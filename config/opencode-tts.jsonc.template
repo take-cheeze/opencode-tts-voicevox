@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "mode": "summary",
+  "backend": "edge_tts",
+  "edge_tts": {
+    // Absolute path to the built opencode-tts-voicevox shim.
+    // install.sh fills this in for you.
+    "command": ["/home/you/.local/bin/opencode-tts-voicevox"],
+    // --voice is still parsed & ignored by the shim (only one model is loaded).
+    "voice": "ja-JP-ZundamonNeural",
+    "rate": "+25%",
+    "volume": "+0%"
+  }
+}

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  voicevox-shim:
+    name: voicevox shim build + synth (e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: sudo apt-get update -y && sudo apt-get install -y build-essential unzip ffmpeg
+
+      # VOICEVOX assets are ~90 MiB and checksummed by fetch-voicevox.sh;
+      # cache them so the download is one-time.
+      - name: Cache VOICEVOX assets
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/voicevox-assets
+          key: voicevox-assets-${{ runner.os }}-${{ hashFiles('voicevox/fetch-voicevox.sh') }}
+          restore-keys: voicevox-assets-${{ runner.os }}-
+
+      - name: Fetch VOICEVOX assets (cache miss)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash voicevox/fetch-voicevox.sh ~/voicevox-assets
+
+      - name: Build
+        run: make -C voicevox VOICEVOX_DIR=$HOME/voicevox-assets
+
+      - name: Synthesize + transcode (e2e)
+        working-directory: voicevox
+        run: |
+          ./opencode-tts-voicevox --voice x --rate +25% --volume +0% \
+            --text "CI の smoke test です。" \
+            --write-media /tmp/smoke.wav
+          size=$(wc -c < /tmp/smoke.wav); echo "synth ${size} bytes"
+          [ "$size" -gt 4000 ] || { echo "output too small to be audio" >&2; exit 1; }
+          ffmpeg -y -i /tmp/smoke.wav -vn -f mp3 -codec:a libmp3lame -q:a 2 /tmp/smoke.mp3
+          [ "$(wc -c < /tmp/smoke.mp3)" -gt 1000 ] || { echo "mp3 too small" >&2; exit 1; }
+          echo "voicevox shim OK"
+
+  dispatcher:
+    name: dispatcher (CJK routing) unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: CJK detection + syntax
+        run: |
+          python3 -m py_compile opencode-tts-dispatch
+          cp opencode-tts-dispatch /tmp/dispatch_module.py
+          python3 - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("d", "/tmp/dispatch_module.py")
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          assert m.has_cjk("こんにちは世界") is True
+          assert m.has_cjk("Hello World") is False
+          assert m.has_cjk("안녕하세요") is True
+          assert m.has_cjk("你好世界") is True
+          assert m.has_cjk("mixed 中文") is True
+          print("dispatcher: CJK detection OK")
+          PY

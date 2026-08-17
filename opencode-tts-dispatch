@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""edge-tts lookalike that dispatches speech by language.
+
+  CJK text (kana / Han / Hangul)   -> VOICEVOX CORE C shim  (fast, offline)
+  everything else (English, ...)   -> voiceger HTTP server  (Zundamon GPT-SoVITS)
+
+Accepts exactly the edge-tts CLI the opencode-tts plugin passes:
+    --voice V --rate R --volume P --text T --write-media OUT.mp3
+
+Output is a real audio file at OUT (MP3 when ffplay is present, or always MP3
+via ffmpeg so mpg123 also works).
+
+Environment:
+  VOICEVOX_BIN   C shim path   (default ~/.local/bin/opencode-tts-voicevox)
+  VOICEGER_URL   server base   (default http://127.0.0.1:8123)
+  FFMPEG_BIN     (default ffmpeg)
+  VOICEGER_LANG  override the voiceger language passed to /tts
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.request
+
+VOICEVOX = os.environ.get("VOICEVOX_BIN", os.path.expanduser("~/.local/bin/opencode-tts-voicevox"))
+VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:8123").rstrip("/")
+FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
+ERR = "/tmp/opencode-tts-dispatch.err"
+
+
+def sh(cmd):
+    if os.system(cmd + " >/dev/null 2>%s" % ERR) != 0:
+        with open(ERR, encoding="utf-8", errors="replace") as fh:
+            sys.stderr.write(fh.read())
+        raise SystemExit(1)
+
+
+def quote(s):
+    return "'" + s.replace("'", "'\\''") + "'"
+
+
+def has_cjk(text):
+    for ch in text:
+        o = ord(ch)
+        if 0x3040 <= o <= 0x30FF:    # kana
+            return True
+        if 0x4E00 <= o <= 0x9FFF:    # CJK Han (also covers Cantonese)
+            return True
+        if 0xAC00 <= o <= 0xD7AF:    # Hangul syllables
+            return True
+    return False
+
+
+def mp3(in_path, out_path):
+    sh(FFMPEG + " -y -i " + quote(in_path) + " -vn -f mp3 -codec:a libmp3lame"
+       + " -q:a 2 " + quote(out_path))
+
+
+def speak_via_voicevox(args):
+    cmd = (VOICEVOX + " "
+           + "--voice " + quote(args.voice)
+           + " --rate " + quote(args.rate)
+           + " --volume " + quote(args.volume)
+           + " --text " + quote(args.text)
+           + " --write-media " + quote(args.out))
+    sh(cmd)
+    tmp = args.out + ".wav"
+    os.system("mv -f " + quote(args.out) + " " + quote(tmp) + " >/dev/null")
+    mp3(tmp, args.out)
+    os.system("rm -f " + quote(tmp) + " >/dev/null")
+
+
+def speak_via_voiceger(args):
+    lang = os.environ.get("VOICEGER_LANG", "English")
+    body = json.dumps({"text": args.text, "text_language": lang}).encode("utf-8")
+    req = urllib.request.Request(
+        VOICEGER + "/tts", data=body,
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    path = result.get("file_path")
+    if not path or not os.path.exists(path):
+        raise SystemExit("voiceger returned no usable audio: %r" % (result,))
+    mp3(path, args.out)
+    os.system("rm -f " + quote(path) + " >/dev/null")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--voice", default="en-US-AvaNeural")
+    ap.add_argument("--rate", default="+0%")
+    ap.add_argument("--volume", default="+0%")
+    ap.add_argument("--text", dest="text", required=True)
+    ap.add_argument("--write-media", dest="out", required=True)
+    args = ap.parse_args()
+
+    if not args.text.strip():
+        raise SystemExit("no --text given")
+
+    if has_cjk(args.text) or os.environ.get("VOICEGER_LANG", "English") == "Japanese":
+        speak_via_voicevox(args)
+    else:
+        speak_via_voiceger(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,12 @@
+# build artifacts
+opencode-tts-voicevox
+*.o
+*.a
+__pycache__/
+*.pyc
+
+# downloaded models / local audio (never commit)
+voicevox/assets/
+*.mp3
+*.wav
+!docs/**

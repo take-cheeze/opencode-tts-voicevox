@@ -1,0 +1,19 @@
+[Unit]
+Description=Voiceger Zundamon TTS server (GPT-SoVITS) for opencode-tts
+After=network.target
+
+[Service]
+Type=simple
+# The launcher resolves all paths from env + its own location; override with
+# VOICEGER_*_DIR / VOICEGER_PORT / VOICEGER_DEVICE if your layout differs.
+ExecStart=/home/takecheeze/dev/opencode-tts-voicevox/voiceger/run-voiceger-server.sh
+Environment=VOICEGER_PORT=8123
+Environment=VOICEGER_DEVICE=cpu
+Restart=on-failure
+RestartSec=5
+# Cold model load is slow (~1-2 min on CPU); allow it so systemd doesn't
+# kill the service mid-startup.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
