@@ -39,7 +39,7 @@ for label, path in [("GPT-SoVITS dir", GS), ("GPT weights", GPT),
         raise SystemExit(f"voiceger: missing {label}: {path}\n"
                          f"  (set VOICEGER_SRC correctly / run setup-voiceger.sh)")
 
-device = os.environ.get("VOICEGER_DEVICE", "cpu")
+device = os.environ.get("VOICEGER_DEVICE", "cpu")  # cpu | cuda | mps (Apple GPU)
 is_half = os.environ.get("VOICEGER_IS_HALF", "false").lower() == "true"
 
 os.environ.setdefault("version", "v2")

@@ -20,19 +20,33 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import urllib.request
 
 VOICEVOX = os.environ.get("VOICEVOX_BIN", os.path.expanduser("~/.local/bin/opencode-tts-voicevox"))
 VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:8123").rstrip("/")
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
-ERR = "/tmp/opencode-tts-dispatch.err"
+# tempfile honours $TMPDIR, which on macOS is a per-user directory rather
+# than a shared /tmp.
+ERR = os.path.join(tempfile.gettempdir(), "opencode-tts-dispatch.%d.err" % os.getpid())
+
+
+def unlink(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def sh(cmd):
-    if os.system(cmd + " >/dev/null 2>%s" % ERR) != 0:
-        with open(ERR, encoding="utf-8", errors="replace") as fh:
-            sys.stderr.write(fh.read())
-        raise SystemExit(1)
+    rc = os.system(cmd + " >/dev/null 2>%s" % ERR)
+    try:
+        if rc != 0:
+            with open(ERR, encoding="utf-8", errors="replace") as fh:
+                sys.stderr.write(fh.read())
+            raise SystemExit(1)
+    finally:
+        unlink(ERR)
 
 
 def quote(s):
@@ -65,9 +79,9 @@ def speak_via_voicevox(args):
            + " --write-media " + quote(args.out))
     sh(cmd)
     tmp = args.out + ".wav"
-    os.system("mv -f " + quote(args.out) + " " + quote(tmp) + " >/dev/null")
+    os.replace(args.out, tmp)
     mp3(tmp, args.out)
-    os.system("rm -f " + quote(tmp) + " >/dev/null")
+    unlink(tmp)
 
 
 def speak_via_voiceger(args):
@@ -82,7 +96,7 @@ def speak_via_voiceger(args):
     if not path or not os.path.exists(path):
         raise SystemExit("voiceger returned no usable audio: %r" % (result,))
     mp3(path, args.out)
-    os.system("rm -f " + quote(path) + " >/dev/null")
+    unlink(path)
 
 
 def main():
