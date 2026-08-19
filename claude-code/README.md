@@ -90,17 +90,29 @@ ends. Set `CLAUDE_TTS_FORWARD=off` to force local synthesis, or point
 ### opencode-tts over the same tunnel
 
 `opencode-tts` does not use this hook — it runs `opencode-tts-dispatch` for a
-file and plays that file itself. The dispatcher forwards too: with a receiver
-reachable it POSTs to `/synth`, gets finished audio back, and writes it to
-`--write-media` unchanged. The plugin then plays it exactly as always.
+file and plays that file itself. The dispatcher forwards too, in one of two
+shapes (`TTS_FORWARD_MODE`):
 
-So a remote host needs neither models **nor ffmpeg** — just the dispatcher
-script. And on a host where `PULSE_SERVER` is already forwarded (the usual
-`RemoteForward 24713 localhost:4713` trick), that playback lands on your
-speakers as well, with no further setup.
+| mode | what crosses the link | who plays it |
+|---|---|---|
+| `speak` (default) | text only | the receiver, natively |
+| `synth` | text out, audio back | the caller |
+
+**`speak` is the default because `synth` sends the sound twice**: down as an
+MP3, then back up as decoded PCM through whatever the caller plays it with —
+roughly 20x larger than the MP3 that produced it. In `speak` mode the receiver
+synthesizes *and* plays, and `--write-media` gets a 357-byte silent MP3 so the
+plugin has a real file to play and stays happy.
+
+That also drops two dependencies: no `PULSE_SERVER` forward is needed, and no
+audio player is needed on the remote at all. If the plugin fails to find one it
+throws *after* the receiver has already made the sound, so you still hear it.
+
+Use `synth` when the caller must genuinely own playback — for instance a host
+whose audio is already routed somewhere you want.
 
 Dispatcher knobs mirror the hook's: `TTS_FORWARD`, `TTS_FORWARD_PORT`,
-`TTS_TOKEN`.
+`TTS_TOKEN`, plus `TTS_FORWARD_MODE`.
 
 ### Shared remote hosts
 
