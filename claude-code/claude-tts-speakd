@@ -17,7 +17,8 @@ voiceger, and no audio device:
 
 Endpoints:
     GET  /ping    -> {"ok": true, ...}
-    POST /speak   {"text": "...", "rate": "+25%", "voice": "..."} -> 202 {"ok": true}
+    POST /speak   {"text":"...", "rate":"+25%", "voice":"...", "summarize":bool,
+                   "translate":bool} -> 202 {"ok": true}
     POST /synth   {"text": "...", "rate": "+25%", "voice": "..."} -> 200 audio/mpeg
 
 /speak plays here and is what the Claude Code hook uses. /synth hands the
@@ -173,6 +174,8 @@ class Handler(BaseHTTPRequestHandler):
         argv = [SPEAK]
         if req.get("summarize"):
             argv.append("--summarize")
+        if req.get("translate"):
+            argv.append("--translate")
         argv += ["--text", text]
         try:
             # Detached: answer immediately so the remote turn is never held

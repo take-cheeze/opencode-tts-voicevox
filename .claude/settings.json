@@ -23,6 +23,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/claude-code/claude-tts-speak\" --user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

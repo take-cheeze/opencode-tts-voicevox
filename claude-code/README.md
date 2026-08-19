@@ -19,8 +19,19 @@ Claude Code finishes a turn
 ## Setup
 
 `install.sh` puts the script in `~/.local/bin`. Registering the hook is a
-separate, opt-in step — add it to `~/.claude/settings.json` (all projects) or
-`.claude/settings.json` (this project only):
+separate, opt-in step:
+
+```sh
+claude-code/setup-hooks.sh --user     # ~/.claude/settings.json, every project
+claude-code/setup-hooks.sh --project  # ./.claude/settings.json, this repo --
+                                       # commit it: it's the ONLY scope Claude
+                                       # Code Web reads (see "Claude Code Web"
+                                       # below)
+claude-code/setup-hooks.sh --all      # both (default with no flags)
+```
+
+It's idempotent (safe to re-run) and merges into whatever else is already in
+that `settings.json`, rather than overwriting it. Equivalently, by hand:
 
 ```json
 {
@@ -41,6 +52,33 @@ separate, opt-in step — add it to `~/.claude/settings.json` (all projects) or
 without it every turn would sit there waiting for Zundamon to stop talking.
 
 Review or disable it later with `/hooks`.
+
+## Speak what you type
+
+A second, optional hook (`--user-prompt`, on `UserPromptSubmit`) speaks your
+own prompt back in a *different* voice than whatever answers it, so the two
+are never confusable:
+
+```sh
+CLAUDE_TTS_USER_VOICE=metan claude-code/setup-hooks.sh --all
+```
+
+Unset `CLAUDE_TTS_USER_VOICE` (the default) and this hook is a fast no-op --
+`setup-hooks.sh` registers it unconditionally, same as Stop/Notification.
+
+VOICEVOX only understands Japanese, so a non-Japanese prompt is translated
+first, with the same self-hosted endpoint `--summarize` already talks to
+(`CLAUDE_TTS_SUMMARY_URL` / `CLAUDE_TTS_SUMMARY_MODEL`) -- no extra model to
+run just for this. Already-Japanese prompts skip translation.
+
+`UserPromptSubmit` cannot run async: Claude Code waits for the hook command
+to exit before your turn starts, full stop (`"async"` is silently ignored for
+this event). `claude-tts-speak --user-prompt` handles that itself -- it reads
+your prompt, spawns a fully detached child to translate + synthesize + play,
+and returns before that child has done anything, typically well under 150 ms.
+It also prints nothing, deliberately: Claude Code folds a `UserPromptSubmit`
+hook's stdout into the turn's context, which is not where a stray debug line
+belongs.
 
 ## Over SSH
 
@@ -122,6 +160,34 @@ speak. Set the same `CLAUDE_TTS_TOKEN` at both ends; the receiver then answers
 unauthenticated requests with 403. Bodies over `CLAUDE_TTS_MAXBYTES` (8 KiB)
 are rejected outright.
 
+## Claude Code Web
+
+[Claude Code on the web](https://claude.ai/code) runs your session in
+Anthropic's cloud, not on your machine, so `~/.claude/settings.json` never
+reaches it (only the repo's own `.claude/settings.json`, or org-managed
+settings) and there are no speakers to synthesize to. Same fix as SSH, one
+layer up: instead of tunneling over an SSH session that doesn't exist here,
+expose `claude-tts-speakd` to the public internet via Tailscale Funnel.
+
+```sh
+claude-code/setup-hooks.sh --project   # commit .claude/settings.json
+claude-code/setup-tunnel.sh            # brings up the Funnel, generates
+                                        # CLAUDE_TTS_TOKEN if you don't have
+                                        # one, prints what to paste where
+claude-code/register-web-env.sh        # (optional) puts that on your
+                                        # clipboard and opens claude.ai/code
+```
+
+Then, in the environment dialog (cloud icon above the message box on
+claude.ai/code → Add/edit environment): set **Network access** to Custom with
+the Funnel hostname allowed, and add `CLAUDE_TTS_FORWARD` / `CLAUDE_TTS_TOKEN`
+as **Environment variables**. There is no API for this step — it is a web-UI
+dialog only, which is what `register-web-env.sh` works around by getting the
+exact values onto your clipboard instead of you retyping them.
+
+`claude-code/setup-tunnel.sh --off` tears the Funnel down again without
+touching `claude-tts-speakd` or your token.
+
 ## Tuning
 
 | Variable | Default | |
@@ -129,6 +195,10 @@ are rejected outright.
 | `CLAUDE_TTS_SENTENCES` | `2` | how many sentences to read |
 | `CLAUDE_TTS_MAXCHARS` | `350` | hard cap before truncating |
 | `CLAUDE_TTS_RATE` | `+25%` | passed through to the dispatcher |
+| `CLAUDE_TTS_VOICE` | `ja-JP-ZundamonNeural` | which voice speaks Claude's replies |
+| `CLAUDE_TTS_USER_VOICE` | unset | which voice speaks your prompts (`--user-prompt`); unset disables it |
+| `CLAUDE_TTS_TRANSLATE_TO` | `Japanese` | `--translate` / `--user-prompt` target language |
+| `CLAUDE_TTS_PROMPT_MAXCHARS` | `200` | cap on how much of a prompt gets spoken |
 | `CLAUDE_TTS_DISPATCH` | `~/.local/bin/opencode-tts-dispatch` | dispatcher path |
 | `CLAUDE_TTS_PLAYER` | `afplay`, else `ffplay`/`mpg123`/`mpv` | audio player |
 | `CLAUDE_TTS_DEBUG` | unset | `1` reports why nothing was spoken |
@@ -152,7 +222,10 @@ are rejected outright.
   user turn as the end of the turn — otherwise the first tool result would stop
   the search and nothing would ever be found.
 - **Barge-in**: a new response kills playback still running from the previous
-  one, so replies do not pile up on top of each other.
+  one, so replies do not pile up on top of each other -- this applies across
+  `--user-prompt` and the Stop hook too, sharing one "currently speaking" slot,
+  so an assistant reply that lands while your own prompt is still being read
+  back correctly cuts it off rather than overlapping.
 - **What gets spoken** is prose only: fenced code, tables, URLs, and inline code
   that looks like a path, flag, or command are dropped, because they are
   unlistenable read aloud.
