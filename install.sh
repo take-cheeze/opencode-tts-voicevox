@@ -10,10 +10,17 @@
 # Supported: Linux (systemd user services) and macOS (launchd user agents).
 #
 # Usage:
-#   install.sh [--skip-voiceger]
+#   install.sh [--skip-voiceger] [--translate-always]
 #
 #   --skip-voiceger   do not set up the (larger) voiceger GPT-SoVITS stack;
 #                     Japanese/CJK still works via the voicevox shim.
+#   --translate-always  same effect as --skip-voiceger, for when this box's
+#                     hooks always translate to Japanese first (e.g. the
+#                     Claude Code Stop hook runs `claude-tts-speak --translate`
+#                     unconditionally, or the opencode plugin has
+#                     OPENCODE_TTS_TRANSLATE_REPLIES=1) -- text handed to
+#                     opencode-tts-dispatch is then always CJK, so voiceger's
+#                     English/multilingual path would never be exercised.
 #   --clone-src       clone the voiceger_v2 source tree if it is missing
 #                     (forwarded to setup-voiceger.sh).
 #
@@ -28,7 +35,7 @@ SKIP_VOICEGER=0
 SETUP_ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    --skip-voiceger) SKIP_VOICEGER=1 ;;
+    --skip-voiceger|--translate-always) SKIP_VOICEGER=1 ;;
     --clone-src)     SETUP_ARGS+=("$arg") ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
