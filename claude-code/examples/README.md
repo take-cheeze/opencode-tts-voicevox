@@ -67,13 +67,24 @@ opencode has a plugin API, so this is a plugin rather than a hook. Drop
 nothing goes in `opencode.json`.
 
 It speaks the reply on `session.idle` and announces permission prompts through
-`permission.ask`. Two things in it are deliberate and easy to get wrong:
+`permission.ask`. Three things in it are deliberate and easy to get wrong:
 
 - **`output.status` is never written.** Writing it *answers* the prompt instead
   of announcing it.
 - **`Bun.spawn`, not the plugin's `$`.** That `$` is Bun Shell, which has no
   `command` builtin — the trap that makes `opencode-tts` report "No audio player
   found" on Linux while ffplay sits on PATH.
+- **`chat.message` is awaited by opencode**, unlike Claude Code's shell-command
+  hooks. It fires on your own submitted prompt -- the closest opencode has to
+  Claude Code's `UserPromptSubmit` -- and opencode blocks the pipeline on its
+  returned promise, so it must only ever spawn-and-`unref()`, never await the
+  process itself, or every prompt would wait on synthesis + playback.
+
+Set `OPENCODE_TTS_USER_VOICE` (e.g. `metan`) to have it read your own prompts
+back too, in that voice, translated to Japanese first through the same
+self-hosted endpoint the summarizer uses (`CLAUDE_TTS_SUMMARY_URL` /
+`CLAUDE_TTS_SUMMARY_MODEL`, set on whichever machine actually synthesizes --
+see Summarizer below). Unset, `chat.message` is a no-op.
 
 ## The tunnel
 
