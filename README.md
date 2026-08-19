@@ -115,5 +115,8 @@ on Linux, a launchd user agent on macOS:
   Upstream ships one wav per emotion rather than a single `reference.wav`,
   so the server picks the first alphabetically (the normal-emotion take,
   which is what `ref_text.txt` transcribes). Override with `VOICEGER_REF`.
+- **Remote hosts**: `TTS_FORWARD` makes the dispatcher fetch finished audio
+  from a `claude-tts-speakd` instead of synthesizing, so a machine you SSH into
+  needs no models and no ffmpeg. See `claude-code/README.md`.
 - **License**: audio generated with the Zundamon voice must be credited
   **VOICEVOX:ずんだもん** per [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html).

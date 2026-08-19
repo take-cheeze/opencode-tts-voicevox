@@ -10,7 +10,17 @@ Accepts exactly the edge-tts CLI the opencode-tts plugin passes:
 Output is a real audio file at OUT (MP3 when ffplay is present, or always MP3
 via ffmpeg so mpg123 also works).
 
+Over SSH there is a third option: if a claude-tts-speakd is reachable (normally
+through `RemoteForward 17999 localhost:17999`), the text goes there, the audio
+comes back, and it is written to --write-media unchanged. The caller plays it
+as usual. A host set up that way needs no VOICEVOX assets, no voiceger, and no
+ffmpeg -- only this script.
+
 Environment:
+  TTS_FORWARD    receiver URL, or "off" to always synthesize locally;
+                 unset auto-detects one on TTS_FORWARD_PORT
+  TTS_FORWARD_PORT  loopback port to probe (default 17999)
+  TTS_TOKEN      shared secret, if the receiver requires one
   VOICEVOX_BIN   C shim path   (default ~/.local/bin/opencode-tts-voicevox)
   VOICEGER_URL   server base   (default http://127.0.0.1:18123)
   FFMPEG_BIN     (default ffmpeg)
@@ -33,6 +43,9 @@ VOICEVOX = os.environ.get("VOICEVOX_BIN", os.path.expanduser("~/.local/bin/openc
 VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:18123").rstrip("/")
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 TRIES = max(1, int(os.environ.get("VOICEGER_TRIES", "3")))
+FORWARD = os.environ.get("TTS_FORWARD", "")
+FORWARD_PORT = os.environ.get("TTS_FORWARD_PORT", "17999")
+TTS_TOKEN = os.environ.get("TTS_TOKEN", "")
 RETRY_WAIT = 2.0
 SERVICE_HINT = (
     "  check: launchctl print gui/%d/com.opencode-tts.voiceger\n"
@@ -96,6 +109,20 @@ def speak_via_voicevox(args):
            + " --volume " + quote(args.volume)
            + " --text " + quote(args.text)
            + " --write-media " + quote(args.out))
+    # A shim built inside a Nix shell carries a DT_RUNPATH into the Nix store,
+    # but the loader does not apply it transitively to the dlopen()ed
+    # libvoicevox_core.so ("libstdc++.so.6: cannot open shared object file").
+    # Give the shim a findable libstdc++ via a scoped env prefix so it does not
+    # leak into ffmpeg/ffplay and friends.
+    for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64",
+              "/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"):
+        if not os.path.exists(os.path.join(d, "libstdc++.so.6")):
+            continue
+        base = os.environ.get("LD_LIBRARY_PATH", "")
+        if d not in base.split(":"):
+            cmd = "env LD_LIBRARY_PATH=%s%s %s" % (
+                quote(d), (":" + quote(base) if base else ""), cmd)
+        break
     sh(cmd)
     tmp = args.out + ".wav"
     os.replace(args.out, tmp)
@@ -140,6 +167,54 @@ def speak_via_voiceger(args):
     unlink(path)
 
 
+def forward_target():
+    """Receiver that should synthesize for us, or None to do it here.
+
+    "off" is what claude-tts-speakd sets on the children it spawns, so the
+    dispatcher it runs cannot discover the daemon and hand the work back.
+    """
+    if FORWARD.lower() in ("off", "no", "0"):
+        return None
+    if FORWARD:
+        return FORWARD.rstrip("/")
+    url = "http://127.0.0.1:%s" % FORWARD_PORT
+    try:
+        with urllib.request.urlopen(url + "/ping", timeout=0.5) as resp:
+            if json.loads(resp.read().decode("utf-8")).get("ok"):
+                return url
+    except Exception:
+        return None
+    return None
+
+
+def synth_via_forward(args, target):
+    """Fetch finished audio from the receiver. True if args.out was written."""
+    body = json.dumps({"text": args.text, "rate": args.rate,
+                       "volume": args.volume, "voice": args.voice}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if TTS_TOKEN:
+        headers["X-TTS-Token"] = TTS_TOKEN
+    req = urllib.request.Request(target + "/synth", data=body,
+                                 headers=headers, method="POST")
+    try:
+        # Generous: the far end may be doing GPT-SoVITS on CPU.
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            audio = resp.read()
+        if not audio:
+            raise ValueError("receiver returned no audio")
+        with open(args.out, "wb") as fh:
+            fh.write(audio)
+        return True
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()
+        sys.stderr.write("opencode-tts-dispatch: receiver at %s failed: "
+                         "HTTP %d %s\n" % (target, exc.code, detail[:300]))
+    except Exception as exc:
+        sys.stderr.write("opencode-tts-dispatch: cannot reach receiver at "
+                         "%s (%s)\n" % (target, exc))
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--voice", default="en-US-AvaNeural")
@@ -151,6 +226,10 @@ def main():
 
     if not args.text.strip():
         raise SystemExit("no --text given")
+
+    target = forward_target()
+    if target and synth_via_forward(args, target):
+        return
 
     if has_cjk(args.text) or os.environ.get("VOICEGER_LANG", "English") == "Japanese":
         speak_via_voicevox(args)

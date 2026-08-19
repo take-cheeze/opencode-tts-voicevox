@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Speak Claude Code's final response through the Zundamon TTS stack.
+
+Wired up as a Stop hook: Claude Code writes the hook payload to stdin, we pull
+the last assistant text out of the session transcript, reduce it to something
+worth hearing, and hand it to opencode-tts-dispatch (CJK -> VOICEVOX, else
+-> voiceger).
+
+Over SSH, the models and the speakers are on the machine you are sitting at,
+not the one running Claude. If a claude-tts-speakd is reachable (normally
+through `RemoteForward 17999 localhost:17999`), the *text* is sent there and
+synthesis happens at that end -- so the remote host needs no models, no
+voiceger, and no audio device.
+
+The hook must never break the session, so every failure path exits 0 quietly.
+Set CLAUDE_TTS_DEBUG=1 to send the reasons to stderr instead.
+
+Environment:
+  CLAUDE_TTS_DISPATCH   dispatcher path  (default ~/.local/bin/opencode-tts-dispatch)
+  CLAUDE_TTS_SENTENCES  how many sentences to speak (default 2)
+  CLAUDE_TTS_MAXCHARS   hard cap before truncating   (default 350)
+  CLAUDE_TTS_RATE       speech rate passed through   (default +25%)
+  CLAUDE_TTS_PLAYER     override the audio player command
+  CLAUDE_TTS_FORWARD    receiver URL, or "off" to always speak locally;
+                        unset auto-detects one on CLAUDE_TTS_FORWARD_PORT
+  CLAUDE_TTS_FORWARD_PORT  loopback port to probe (default 17999)
+  CLAUDE_TTS_TOKEN      shared secret, if the receiver requires one
+  CLAUDE_TTS_DEBUG      1 to report why nothing was spoken
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+HOME = os.path.expanduser("~")
+DISPATCH = os.environ.get("CLAUDE_TTS_DISPATCH",
+                          os.path.join(HOME, ".local/bin/opencode-tts-dispatch"))
+SENTENCES = int(os.environ.get("CLAUDE_TTS_SENTENCES", "2"))
+MAXCHARS = int(os.environ.get("CLAUDE_TTS_MAXCHARS", "350"))
+RATE = os.environ.get("CLAUDE_TTS_RATE", "+25%")
+STATE = os.path.join(tempfile.gettempdir(), "claude-tts-speak.pid")
+FORWARD = os.environ.get("CLAUDE_TTS_FORWARD", "")
+FORWARD_PORT = os.environ.get("CLAUDE_TTS_FORWARD_PORT", "17999")
+TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
+
+# Terminators for both scripts; CJK stops double as sentence ends.
+SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+|(?<=[。！？])")
+
+
+def debug(msg):
+    if os.environ.get("CLAUDE_TTS_DEBUG") == "1":
+        sys.stderr.write("claude-tts-speak: %s\n" % msg)
+
+
+def is_real_user_turn(row):
+    if "toolUseResult" in row:
+        return False
+    content = row.get("message", {}).get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(b.get("type") == "text" for b in content)
+    return False
+
+
+def last_assistant_text(path):
+    """Final assistant prose of the turn that just ended.
+
+    Walks backwards to the newest text block, skipping tool_use/thinking and
+    subagent (sidechain) rows, and stops at the user message that opened the
+    turn so an older turn's text can never leak through.
+
+    Tool results are also stored as type "user", so only a genuine user turn
+    ends the walk -- otherwise the very first tool result would stop it.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            rows = [json.loads(line) for line in fh if line.strip()]
+    except (OSError, ValueError) as exc:
+        debug("cannot read transcript %s: %s" % (path, exc))
+        return ""
+
+    for row in reversed(rows):
+        if row.get("isSidechain"):
+            continue
+        kind = row.get("type")
+        if kind == "user":
+            if is_real_user_turn(row):
+                break
+            continue
+        if kind != "assistant":
+            continue
+        content = row.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        text = "\n".join(p for p in parts if p.strip())
+        if text.strip():
+            return text
+    return ""
+
+
+def strip_markdown(text):
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)      # fenced code
+    text = re.sub(r"^\s*\|.*$", " ", text, flags=re.M)      # table rows
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.M)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)    # links -> label
+    text = re.sub(r"https?://\S+", " ", text)
+    # Inline code: keep short identifiers, drop paths/flags/commands, which are
+    # unlistenable read aloud.
+    text = re.sub(r"`([^`]*)`",
+                  lambda m: " " if re.search(r"[/\\_~*$]|^-|\s", m.group(1))
+                  else m.group(1),
+                  text)
+    text = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", text)
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.M)    # bullets
+    text = re.sub(r"^\s*\d+\.\s+", "", text, flags=re.M)
+    text = re.sub(r"[\U0001F000-\U0001FAFF☀-➿]", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return re.sub(r"\s*\n\s*", " ", text).strip()
+
+
+def speakable(text):
+    text = strip_markdown(text)
+    if not text:
+        return ""
+    chunks = [c for c in SENTENCE_END.split(text) if c and c.strip()]
+    out = " ".join(chunks[:SENTENCES]).strip()
+    if len(out) > MAXCHARS:
+        out = out[:MAXCHARS].rsplit(" ", 1)[0] + "."
+    return out
+
+
+def player_for(path):
+    if os.environ.get("CLAUDE_TTS_PLAYER"):
+        return os.environ["CLAUDE_TTS_PLAYER"].split() + [path]
+    if sys.platform == "darwin" and shutil.which("afplay"):
+        return ["afplay", path]
+    for cmd in (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+                ["mpg123", "-q", path],
+                ["mpv", "--really-quiet", path]):
+        if shutil.which(cmd[0]):
+            return cmd
+    return None
+
+
+def stop_previous():
+    """Barge-in: a new response supersedes whatever is still being read out."""
+    try:
+        with open(STATE) as fh:
+            os.kill(int(fh.read().strip()), 15)
+    except (OSError, ValueError):
+        pass
+
+
+def forward_target():
+    """URL of a receiver that should speak for us, or None to speak locally.
+
+    An explicit CLAUDE_TTS_FORWARD wins (and "off" forces local, which is how
+    claude-tts-speakd stops its own children from bouncing straight back).
+    Otherwise probe the loopback port an `ssh -R` would land on: if something
+    answers there we are the remote end of a session and the audio belongs at
+    the other end.
+    """
+    if FORWARD.lower() in ("off", "no", "0"):
+        return None
+    if FORWARD:
+        return FORWARD.rstrip("/")
+    url = "http://127.0.0.1:%s" % FORWARD_PORT
+    try:
+        req = urllib.request.Request(url + "/ping")
+        with urllib.request.urlopen(req, timeout=0.5) as resp:
+            if json.loads(resp.read().decode("utf-8")).get("ok"):
+                return url
+    except Exception:
+        pass
+    return None
+
+
+def forward(text, target):
+    """Hand the text to the receiver. True if it accepted responsibility."""
+    body = json.dumps({"text": text, "rate": RATE}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if TOKEN:
+        headers["X-TTS-Token"] = TOKEN
+    req = urllib.request.Request(target + "/speak", data=body,
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError as exc:
+        debug("receiver at %s refused: HTTP %d" % (target, exc.code))
+    except Exception as exc:
+        debug("cannot forward to %s: %s" % (target, exc))
+    return False
+
+
+def speak_local(text):
+    if not os.path.isfile(DISPATCH):
+        debug("dispatcher not found at %s" % DISPATCH)
+        return
+
+    fd, out = tempfile.mkstemp(suffix=".mp3", prefix="claude-tts-")
+    os.close(fd)
+    try:
+        subprocess.run([DISPATCH, "--voice", "ja-JP-ZundamonNeural",
+                        "--rate", RATE, "--volume", "+0%",
+                        "--text", text, "--write-media", out],
+                       check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL if not
+                       os.environ.get("CLAUDE_TTS_DEBUG") else None)
+        cmd = player_for(out)
+        if not cmd:
+            debug("no audio player found (afplay/ffplay/mpg123/mpv)")
+            return
+        stop_previous()
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        with open(STATE, "w") as fh:
+            fh.write(str(proc.pid))
+        proc.wait()
+    except (subprocess.CalledProcessError, OSError) as exc:
+        debug("synthesis or playback failed: %s" % exc)
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
+def text_from_hook():
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+
+    transcript = payload.get("transcript_path")
+    if not transcript or not os.path.isfile(transcript):
+        debug("no transcript_path in hook payload")
+        return ""
+    return speakable(last_assistant_text(transcript))
+
+
+def main():
+    # --text speaks the given words directly; that is how claude-tts-speakd
+    # re-enters this script after receiving a forwarded request.
+    if len(sys.argv) > 2 and sys.argv[1] == "--text":
+        text = " ".join(sys.argv[2:]).strip()
+    elif len(sys.argv) > 1:
+        sys.stderr.write("usage: claude-tts-speak [--text WORDS]   "
+                         "(hook payload on stdin otherwise)\n")
+        return
+    else:
+        text = text_from_hook()
+
+    if not text:
+        debug("nothing speakable in the last assistant message")
+        return
+
+    target = forward_target()
+    if target and forward(text, target):
+        debug("forwarded to %s" % target)
+        return
+    speak_local(text)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:                      # never break the session
+        debug("unexpected: %r" % exc)
+    sys.exit(0)
