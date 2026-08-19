@@ -60,6 +60,10 @@ cd opencode-tts-voicevox
 ./install.sh --clone-src     # both backends; clones voiceger_v2 if missing
 # or
 ./install.sh --skip-voiceger # Japanese/CJK only (skips the ~GB model download)
+# or
+./install.sh --translate-always # same as --skip-voiceger, if this box's
+                              # hooks always translate to Japanese first --
+                              # voiceger's English path would never run
 ```
 
 `install.sh` builds the C shim, installs the dispatcher, (optionally) sets up
