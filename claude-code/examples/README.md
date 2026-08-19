@@ -159,6 +159,18 @@ you already have configured — no separate credential to set up, but a
 real, billed call every time it's the tier that ends up answering.
 Override the binary with `CLAUDE_TTS_OPENCODE_BIN` if it's not on `PATH`.
 
+With no `CLAUDE_TTS_OPENCODE_MODEL` set, it doesn't hardcode a model --
+`opencode models --verbose <CLAUDE_TTS_OPENCODE_PROVIDER>` (default
+provider `opencode-go`) is queried for current per-token pricing, ranked
+cheapest first, and cached for `CLAUDE_TTS_OPENCODE_PRICE_TTL` seconds
+(default 6h; that call alone costs ~0.6s, not worth paying on every single
+fallback). "Cheapest" is a $/token fact, not a quality one, and the
+cheapest model isn't always usable -- one observed here 403s outright
+unless you opt into it collecting your data for training, which nothing
+in the model listing itself flags. A model that comes back non-zero gets
+marked bad in the same cache and skipped in favor of the next-cheapest,
+automatically, rather than the whole tier failing over one bad pick.
+
 Endpoints are probed with a one-second TCP connect before use, so a box that is
 down costs a second rather than a generation timeout — worth having if the
 remote is a machine that reboots on its own. If every endpoint fails it falls

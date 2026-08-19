@@ -204,6 +204,9 @@ touching `claude-tts-speakd` or your token.
 | `CLAUDE_TTS_SUMMARY_CLAUDE` | unset | `1` to fall back to the `claude` CLI -- a real API call, opt-in |
 | `CLAUDE_TTS_SUMMARY_OPENCODE` | unset | `1` to fall back to `opencode run` -- also a real API call, tried after `CLAUDE_TTS_SUMMARY_CLAUDE` |
 | `CLAUDE_TTS_OPENCODE_BIN` | found on `PATH` | path to the `opencode` CLI |
+| `CLAUDE_TTS_OPENCODE_MODEL` | unset | pin a model instead of picking the cheapest `CLAUDE_TTS_OPENCODE_PROVIDER` one at runtime |
+| `CLAUDE_TTS_OPENCODE_PROVIDER` | `opencode-go` | provider to pick the cheapest model from |
+| `CLAUDE_TTS_OPENCODE_PRICE_TTL` | `21600` (6h) | how long the price/known-bad cache is trusted |
 | `CLAUDE_TTS_DISPATCH` | `~/.local/bin/opencode-tts-dispatch` | dispatcher path |
 | `CLAUDE_TTS_PLAYER` | `afplay`, else `ffplay`/`mpg123`/`mpv` | audio player |
 | `CLAUDE_TTS_DEBUG` | unset | `1` reports why nothing was spoken |

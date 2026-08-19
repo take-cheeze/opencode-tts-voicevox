@@ -50,10 +50,16 @@ Environment:
                         with -- real cost, real quota); off by default, tried
                         after CLAUDE_TTS_SUMMARY_CLAUDE
   CLAUDE_TTS_OPENCODE_BIN path to the opencode CLI (default: found on PATH)
-  CLAUDE_TTS_OPENCODE_MODEL provider/model for `opencode run -m`
-                        (default: opencode-go/mimo-v2.5, the cheapest
-                        opencode-go model that doesn't require opting into
-                        data collection)
+  CLAUDE_TTS_OPENCODE_MODEL provider/model for `opencode run -m`; unset (the
+                        default) picks the cheapest model of
+                        CLAUDE_TTS_OPENCODE_PROVIDER at runtime, cached for
+                        CLAUDE_TTS_OPENCODE_PRICE_TTL seconds (default 6h),
+                        skipping models that turn out to need something like
+                        a data-collection opt-in
+  CLAUDE_TTS_OPENCODE_PROVIDER opencode provider to pick a model from
+                        (default opencode-go)
+  CLAUDE_TTS_OPENCODE_PRICE_TTL how long the price/skip cache is trusted
+                        before re-querying `opencode models` (default 21600)
   CLAUDE_TTS_USER_VOICE which voice speaks your own prompts (--user-prompt);
                         unset disables the feature entirely, e.g. "metan"
   CLAUDE_TTS_TRANSLATE_TO target language for --translate  (default Japanese)
@@ -70,6 +76,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -109,10 +116,12 @@ SUMMARY_CLAUDE = os.environ.get("CLAUDE_TTS_SUMMARY_CLAUDE") == "1"
 SUMMARIZER = os.environ.get("CLAUDE_TTS_SUMMARIZER") or shutil.which("claude")
 SUMMARY_OPENCODE = os.environ.get("CLAUDE_TTS_SUMMARY_OPENCODE") == "1"
 OPENCODE_BIN = os.environ.get("CLAUDE_TTS_OPENCODE_BIN") or shutil.which("opencode")
-# Cheapest opencode-go model that doesn't require an explicit data-collection
-# opt-in (muse-spark-1.2 is nominally cheaper but 403s without one) -- picked
-# by $/token, not quality; override for anything more discerning.
-OPENCODE_MODEL = os.environ.get("CLAUDE_TTS_OPENCODE_MODEL", "opencode-go/mimo-v2.5")
+# Empty means "figure it out at runtime" -- see cheapest_opencode_models().
+# Set explicitly to skip that entirely and always use one model.
+OPENCODE_MODEL = os.environ.get("CLAUDE_TTS_OPENCODE_MODEL", "")
+OPENCODE_PROVIDER = os.environ.get("CLAUDE_TTS_OPENCODE_PROVIDER", "opencode-go")
+OPENCODE_PRICE_TTL = float(os.environ.get("CLAUDE_TTS_OPENCODE_PRICE_TTL", "21600"))  # 6h
+OPENCODE_PRICE_CACHE = os.path.join(tempfile.gettempdir(), "claude-tts-opencode-prices.json")
 SUMMARY_PROMPT = (
     "Summarize the following assistant response as spoken audio copy in 2 short "
     "sentences. Keep concrete facts, decisions, and next actions. Do not mention "
@@ -333,38 +342,101 @@ def summarize_via_claude(text):
     return None
 
 
-def opencode_run(prompt, text):
-    """Shell out to `opencode run`, an API call through whatever provider
-    opencode is authenticated with. None on failure. Shared by summarize and
-    translate: the invocation is identical, only the prompt differs.
+def _opencode_price_cache_load():
+    try:
+        with open(OPENCODE_PRICE_CACHE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
 
-    --format json rather than the default: default is written for a TTY (a
-    live-updating spinner over ANSI escapes) and does not reliably deliver
-    the final text over a plain pipe, so this parses the newline-delimited
-    JSON event stream instead and keeps the "text" parts.
+
+def _opencode_price_cache_save(data):
+    try:
+        with open(OPENCODE_PRICE_CACHE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+
+
+def _fetch_opencode_prices():
+    """[model_id, ...] for OPENCODE_PROVIDER, cheapest (input+output $/Mtok)
+    first. None on failure.
+
+    `opencode models --verbose` is the only source found for this -- the
+    models.dev catalog `opencode models --refresh` otherwise pulls from does
+    not carry opencode-go, since it is a private, authenticated-only proxy
+    rather than a provider you'd hit with your own key.
     """
     if not OPENCODE_BIN or not os.path.isfile(OPENCODE_BIN):
-        debug("no opencode CLI for this backend")
         return None
-    argv = [OPENCODE_BIN, "run", "--format", "json"]
-    if OPENCODE_MODEL:
-        argv += ["-m", OPENCODE_MODEL]
-    argv.append(prompt + "\n\n" + text)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=SUMMARY_TIMEOUT)
+        proc = subprocess.run(
+            [OPENCODE_BIN, "models", "--verbose", OPENCODE_PROVIDER],
+            capture_output=True, text=True, timeout=SUMMARY_TIMEOUT)
     except (subprocess.TimeoutExpired, OSError) as exc:
-        debug("opencode CLI failed (%s)" % exc)
+        debug("opencode models failed (%s)" % exc)
         return None
     if proc.returncode != 0:
-        debug("opencode CLI rc=%d: %s" % (proc.returncode, (proc.stderr or "")[:200]))
+        debug("opencode models rc=%d" % proc.returncode)
         return None
+    # Output is "<provider>/<id>" name lines each followed by a JSON blob --
+    # not a clean array, so split on the name lines rather than parse whole.
+    blocks = re.split(r"^(%s/\S+)$" % re.escape(OPENCODE_PROVIDER),
+                      proc.stdout or "", flags=re.M)
+    rows = []
+    for i in range(1, len(blocks), 2):
+        name = blocks[i].strip()
+        try:
+            cost = json.loads(blocks[i + 1]).get("cost") or {}
+        except ValueError:
+            continue
+        inp, out = cost.get("input"), cost.get("output")
+        if inp is None or out is None:
+            continue
+        rows.append((name, inp + out))
+    rows.sort(key=lambda r: r[1])
+    return [name for name, _ in rows] or None
 
+
+def cheapest_opencode_models():
+    """Ranked model IDs for OPENCODE_PROVIDER, cheapest first, skipping ones
+    already known bad this cache period (e.g. a model that 403s without a
+    data-collection opt-in -- discoverable only by trying it, since nothing
+    in `opencode models --verbose`'s own metadata flags it).
+
+    Cached for OPENCODE_PRICE_TTL: the models list call itself costs ~0.6s
+    (measured), and this runs on every opencode fallback, not once per
+    process lifetime -- each hook fire is a fresh claude-tts-speak process.
+    """
+    cache = _opencode_price_cache_load()
+    fresh = (cache.get("provider") == OPENCODE_PROVIDER and
+             time.time() - cache.get("fetched", 0) < OPENCODE_PRICE_TTL)
+    if fresh:
+        ranked = cache.get("ranked") or []
+    else:
+        ranked = _fetch_opencode_prices()
+        if ranked is None:
+            ranked = cache.get("ranked") or []  # stale cache beats nothing
+        else:
+            cache = {"provider": OPENCODE_PROVIDER, "fetched": time.time(),
+                     "ranked": ranked, "bad": {}}
+            _opencode_price_cache_save(cache)
+    bad = cache.get("bad") or {}
+    return [m for m in ranked if m not in bad]
+
+
+def mark_opencode_model_bad(model):
+    cache = _opencode_price_cache_load()
+    cache.setdefault("bad", {})[model] = time.time()
+    _opencode_price_cache_save(cache)
+
+
+def _opencode_parse_text(stdout):
     # A part's text is its current state, not a delta -- later events for the
     # same part id replace rather than append, same as the opencode plugin's
     # own message.part.updated handling.
     parts, order = {}, []
-    for line in (proc.stdout or "").splitlines():
+    for line in (stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -379,10 +451,58 @@ def opencode_run(prompt, text):
         if pid not in parts:
             order.append(pid)
         parts[pid] = part.get("text", "")
-    out = "\n".join(parts[pid] for pid in order if parts[pid].strip()).strip()
-    if not out:
-        debug("opencode CLI produced no text part")
-    return out or None
+    return "\n".join(parts[pid] for pid in order if parts[pid].strip()).strip()
+
+
+def opencode_run(prompt, text):
+    """Shell out to `opencode run`, an API call through whatever provider
+    opencode is authenticated with. None on failure. Shared by summarize and
+    translate: the invocation is identical, only the prompt differs.
+
+    --format json rather than the default: default is written for a TTY (a
+    live-updating spinner over ANSI escapes) and does not reliably deliver
+    the final text over a plain pipe, so this parses the newline-delimited
+    JSON event stream instead and keeps the "text" parts.
+
+    With no CLAUDE_TTS_OPENCODE_MODEL override, tries cheapest_opencode_models()
+    in order, cheapest first, moving on when one comes back non-zero (that is
+    how a model needing a data-collection opt-in shows up -- a 403, not
+    anything visible in the model listing) rather than giving up on the first
+    one that happens to be unusable.
+    """
+    if not OPENCODE_BIN or not os.path.isfile(OPENCODE_BIN):
+        debug("no opencode CLI for this backend")
+        return None
+    pinned = bool(OPENCODE_MODEL)
+    candidates = [OPENCODE_MODEL] if pinned else cheapest_opencode_models()
+    if not candidates:
+        debug("no opencode pricing available; trying opencode's own default")
+        candidates = [None]
+
+    for model in candidates:
+        argv = [OPENCODE_BIN, "run", "--format", "json"]
+        if model:
+            argv += ["-m", model]
+        argv.append(prompt + "\n\n" + text)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=SUMMARY_TIMEOUT)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            debug("opencode CLI failed (%s)" % exc)
+            return None
+        if proc.returncode != 0:
+            debug("opencode CLI (%s) rc=%d: %s"
+                  % (model, proc.returncode, (proc.stderr or "")[:200]))
+            if model and not pinned:
+                mark_opencode_model_bad(model)
+                continue
+            return None
+        out = _opencode_parse_text(proc.stdout)
+        if out:
+            return out
+        debug("opencode CLI (%s) produced no text part" % model)
+        return None
+    return None
 
 
 def summarize(text):
