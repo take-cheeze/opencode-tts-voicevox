@@ -74,6 +74,21 @@ install -m 0755 "$REPO/claude-code/claude-tts-speak" "$BIN/claude-tts-speak"
 # everywhere, but only useful on the box with the speakers.
 install -m 0755 "$REPO/claude-code/claude-tts-speakd" "$BIN/claude-tts-speakd"
 
+# On macOS, also register claude-tts-speakd as a launchd agent so it is
+# actually listening on 127.0.0.1:17999 -- otherwise remote hosts probe the
+# port, find nothing, and quietly fall back to local (model-less) processing.
+# Harmless on a box with no remote hosts forwarding to it: it just sits idle
+# on loopback.
+if [[ "$OS" = macos ]]; then
+  echo "==> loading claude-tts-speakd launchd agent"
+  agent_dir="$HOME/Library/LaunchAgents"
+  plist="$agent_dir/com.opencode-tts.speakd.plist"
+  mkdir -p "$agent_dir" "$HOME/Library/Logs"
+  sed "s|@HOME@|$HOME|g" "$REPO/claude-code/com.opencode-tts.speakd.plist" > "$plist"
+  launchctl bootout "gui/$(id -u)/com.opencode-tts.speakd" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+fi
+
 # --- 3. voiceger server (optional) ------------------------------------------
 install_service_linux() {
   local unit_dir="$HOME/.config/systemd/user"
