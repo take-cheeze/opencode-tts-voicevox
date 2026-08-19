@@ -171,9 +171,13 @@ echo "    other voices: $BIN/opencode-tts-voicevox --list-voices"
 for f in ./opencode.json "$HOME/.config/opencode/opencode.json"; do
   [[ -f "$f" ]] || continue
   if ! grep -q '"opencode-tts"' "$f"; then
+    # Strip //-comments so JSONC parses as JSON. Only when // starts a line
+    # or follows whitespace -- a bare /\/\// matched inside "https://..." too
+    # and corrupted every URL in the file (schema, provider baseURL) on any
+    # box whose opencode.json had one.
     node -e '
       const fs=require("fs");const p=process.argv[1];
-      try{const j=JSON.parse(fs.readFileSync(p,"utf8").replace(/\/\//gm,""))
+      try{const j=JSON.parse(fs.readFileSync(p,"utf8").replace(/(^|\s)\/\/.*$/gm,"$1"))
           j.plugin=Array.isArray(j.plugin)?j.plugin:[]
           if(!j.plugin.some(x=>x==="opencode-tts"))j.plugin.push("opencode-tts")
           fs.writeFileSync(p,JSON.stringify(j,null,2)+"\n")}catch(e){}' "$f" \
