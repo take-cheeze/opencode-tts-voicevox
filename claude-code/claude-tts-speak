@@ -387,9 +387,16 @@ def translate(text):
             debug("translate endpoint %s unreachable, skipping" % url)
             continue
         out = translate_via_api(text, url, model)
-        if out:
+        if out and has_cjk(out):
             debug("translated via %s" % url)
             return out
+        if out:
+            # A small model asked to translate sometimes just answers in
+            # English instead -- success-shaped, but not Japanese, and
+            # speaking it would silently fall through to voiceger's single
+            # English voice instead of the VOICEVOX one this was for.
+            debug("translate endpoint %s returned non-Japanese output, "
+                  "treating as failed: %r" % (url, out))
     debug("no translation endpoint available")
     return None
 
