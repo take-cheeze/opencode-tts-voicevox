@@ -25,6 +25,14 @@ Environment:
                         unset auto-detects one on CLAUDE_TTS_FORWARD_PORT
   CLAUDE_TTS_FORWARD_PORT  loopback port to probe (default 17999)
   CLAUDE_TTS_TOKEN      shared secret, if the receiver requires one
+  CLAUDE_TTS_SUMMARY_URL   OpenAI-compatible base for a self-hosted model, e.g.
+                        http://127.0.0.1:11434/v1 (ollama) -- preferred
+  CLAUDE_TTS_SUMMARY_MODEL model id for that endpoint
+  CLAUDE_TTS_SUMMARY_CLAUDE 1 to fall back to the claude CLI (an API call);
+                        off by default, so nothing leaves the machine
+  CLAUDE_TTS_SUMMARIZER path to the claude CLI (default: found on PATH)
+  CLAUDE_TTS_INHIBIT    1 to make this a no-op -- set on the summarizer child
+                        so its own Stop hook cannot start a speak/summarize loop
   CLAUDE_TTS_DEBUG      1 to report why nothing was spoken
 """
 import json
@@ -47,6 +55,16 @@ STATE = os.path.join(tempfile.gettempdir(), "claude-tts-speak.pid")
 FORWARD = os.environ.get("CLAUDE_TTS_FORWARD", "")
 FORWARD_PORT = os.environ.get("CLAUDE_TTS_FORWARD_PORT", "17999")
 TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
+SUMMARY_TIMEOUT = float(os.environ.get("CLAUDE_TTS_SUMMARY_TIMEOUT", "90"))
+SUMMARY_URL = os.environ.get("CLAUDE_TTS_SUMMARY_URL", "").rstrip("/")
+SUMMARY_MODEL = os.environ.get("CLAUDE_TTS_SUMMARY_MODEL", "")
+SUMMARY_CLAUDE = os.environ.get("CLAUDE_TTS_SUMMARY_CLAUDE") == "1"
+SUMMARIZER = os.environ.get("CLAUDE_TTS_SUMMARIZER") or shutil.which("claude")
+SUMMARY_PROMPT = (
+    "Summarize the following assistant response as spoken audio copy in 2 short "
+    "sentences. Keep concrete facts, decisions, and next actions. Do not mention "
+    "that this is a summary. No markdown, no bullets, no preamble, plain text only."
+)
 
 # Terminators for both scripts; CJK stops double as sentence ends.
 SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+|(?<=[。！？])")
@@ -182,9 +200,83 @@ def forward_target():
     return None
 
 
-def forward(text, target):
+def summarize_via_api(text):
+    """Summarize with a self-hosted OpenAI-compatible endpoint. None on failure.
+
+    max_tokens is deliberately generous: a reasoning model spends its budget on
+    reasoning_content first, and a tight cap returns an empty `content` with
+    finish_reason "stop" -- success-shaped, useless.
+    """
+    body = json.dumps({
+        "model": SUMMARY_MODEL or "default",
+        "messages": [{"role": "user",
+                      "content": SUMMARY_PROMPT + "\n\n" + text}],
+        "max_tokens": 2048,
+        "temperature": 0.3,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(SUMMARY_URL + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=SUMMARY_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = (data["choices"][0]["message"].get("content") or "").strip()
+        # Some local builds emit the chain of thought inline rather than in a
+        # separate field.
+        out = re.sub(r"<think>.*?</think>", " ", out, flags=re.S).strip()
+        if out:
+            return out
+        debug("summary endpoint returned empty content")
+    except Exception as exc:
+        debug("summary endpoint failed (%s)" % exc)
+    return None
+
+
+def summarize_via_claude(text):
+    if not SUMMARIZER or not os.path.isfile(SUMMARIZER):
+        debug("no claude CLI for summarizing; truncating instead")
+        return None
+    env = dict(os.environ)
+    # The summarizer is itself a claude session and will fire its own Stop
+    # hook when it exits. Without this it would speak, and summarize, forever.
+    env["CLAUDE_TTS_INHIBIT"] = "1"
+    try:
+        proc = subprocess.run([SUMMARIZER, "-p", SUMMARY_PROMPT],
+                              input=text, capture_output=True, text=True,
+                              env=env, timeout=SUMMARY_TIMEOUT)
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and out:
+            return out
+        debug("summarizer rc=%d" % proc.returncode)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        debug("summarizer failed (%s)" % exc)
+    return None
+
+
+def summarize(text):
+    """Reduce a full response to speakable copy.
+
+    Order matters: a self-hosted endpoint first, so nothing leaves the machine.
+    The claude CLI is a real API call and stays opt-in. Extractive truncation is
+    the floor -- a slightly clumsy sentence beats silence, and it needs nothing.
+    """
+    if SUMMARY_URL:
+        out = summarize_via_api(text)
+        if out:
+            return speakable(out)
+    if SUMMARY_CLAUDE:
+        out = summarize_via_claude(text)
+        if out:
+            return speakable(out)
+    debug("no summarizer available; truncating")
+    return speakable(text)
+
+
+def forward(text, target, summarize_remotely=False):
     """Hand the text to the receiver. True if it accepted responsibility."""
-    body = json.dumps({"text": text, "rate": RATE}).encode("utf-8")
+    body = json.dumps({"text": text, "rate": RATE,
+                       "summarize": bool(summarize_remotely)}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if TOKEN:
         headers["X-TTS-Token"] = TOKEN
@@ -248,12 +340,25 @@ def text_from_hook():
 
 
 def main():
+    if os.environ.get("CLAUDE_TTS_INHIBIT") == "1":
+        # We are inside the summarizer's own claude session; speaking here is
+        # what would turn one summary into an endless chain of them.
+        debug("inhibited")
+        return
+
     # --text speaks the given words directly; that is how claude-tts-speakd
     # re-enters this script after receiving a forwarded request.
-    if len(sys.argv) > 2 and sys.argv[1] == "--text":
-        text = " ".join(sys.argv[2:]).strip()
-    elif len(sys.argv) > 1:
-        sys.stderr.write("usage: claude-tts-speak [--text WORDS]   "
+    # --summarize first reduces them with the claude CLI, wherever the audio is.
+    argv = sys.argv[1:]
+    want_summary = False
+    if "--summarize" in argv:
+        want_summary = True
+        argv = [a for a in argv if a != "--summarize"]
+
+    if len(argv) > 1 and argv[0] == "--text":
+        text = " ".join(argv[1:]).strip()
+    elif argv:
+        sys.stderr.write("usage: claude-tts-speak [--summarize] [--text WORDS]   "
                          "(hook payload on stdin otherwise)\n")
         return
     else:
@@ -264,9 +369,18 @@ def main():
         return
 
     target = forward_target()
-    if target and forward(text, target):
-        debug("forwarded to %s" % target)
-        return
+    if target:
+        # Summarizing happens at the receiver, so the sending host needs no
+        # model -- the same reason synthesis happens there.
+        if forward(text, target, summarize_remotely=want_summary):
+            debug("forwarded to %s (summarize=%s)" % (target, want_summary))
+            return
+
+    if want_summary:
+        text = summarize(text)
+        if not text:
+            debug("summary was empty")
+            return
     speak_local(text)
 
 
