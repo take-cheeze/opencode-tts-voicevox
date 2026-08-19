@@ -6,14 +6,7 @@
 
   launchd does no variable expansion; install.sh substitutes @HOME@.
   Set CLAUDE_TTS_TOKEN here (and on the remote) if the remote host has other
-  users -- they can all reach the forwarded loopback port. It is REQUIRED,
-  not optional, once claude-code/setup-tunnel.sh exposes this port to the
-  internet via Tailscale Funnel for Claude Code Web -- that script generates
-  one and prints the edit to make here, then reload with:
-    launchctl bootout gui/$(id -u)/com.opencode-tts.speakd
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-tts.speakd.plist
-  ('launchctl kickstart -k' restarts the process but does NOT pick up a
-  changed EnvironmentVariables block -- bootout+bootstrap does.)
+  users -- they can all reach the forwarded loopback port.
 -->
 <plist version="1.0">
 <dict>
@@ -36,7 +29,6 @@
          API provider unless CLAUDE_TTS_SUMMARY_CLAUDE=1 is set explicitly. -->
     <key>CLAUDE_TTS_SUMMARY_URL</key><string>http://127.0.0.1:11434/v1</string>
     <key>CLAUDE_TTS_SUMMARY_MODEL</key><string>qwen2.5:1.5b</string>
-    <!-- <key>CLAUDE_TTS_TOKEN</key><string>REPLACE_ME</string> -->
   </dict>
 
   <key>RunAtLoad</key><true/>

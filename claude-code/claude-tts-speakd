@@ -17,7 +17,8 @@ voiceger, and no audio device:
 
 Endpoints:
     GET  /ping    -> {"ok": true, ...}
-    POST /speak   {"text": "...", "rate": "+25%", "voice": "..."} -> 202 {"ok": true}
+    POST /speak   {"text":"...", "rate":"+25%", "voice":"...", "summarize":bool,
+                   "translate":bool} -> 202 {"ok": true}
     POST /synth   {"text": "...", "rate": "+25%", "voice": "..."} -> 200 audio/mpeg
 
 /speak plays here and is what the Claude Code hook uses. /synth hands the
@@ -33,7 +34,7 @@ Environment:
   CLAUDE_TTS_BIND     listen address       (default 127.0.0.1)
   CLAUDE_TTS_SPEAK    speak script path    (default ~/.local/bin/claude-tts-speak)
   CLAUDE_TTS_TOKEN    require this shared secret in X-TTS-Token
-  CLAUDE_TTS_MAXBYTES reject bodies larger than this (default 8192)
+  CLAUDE_TTS_MAXBYTES reject bodies larger than this (default 131072)
 """
 import json
 import os
@@ -50,7 +51,10 @@ SPEAK = os.environ.get("CLAUDE_TTS_SPEAK",
 DISPATCH = os.environ.get("CLAUDE_TTS_DISPATCH",
                           os.path.join(HOME, ".local/bin/opencode-tts-dispatch"))
 TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
-MAXBYTES = int(os.environ.get("CLAUDE_TTS_MAXBYTES", "8192"))
+# Summarize requests carry a whole assistant response, not a sentence, so the
+# cap has to fit one. Still bounded: this port is reachable by any local user
+# on a shared remote host.
+MAXBYTES = int(os.environ.get("CLAUDE_TTS_MAXBYTES", "131072"))
 
 
 def usable_path():
@@ -165,10 +169,18 @@ class Handler(BaseHTTPRequestHandler):
         # would be a surprise.
         if req.get("voice"):
             env["CLAUDE_TTS_VOICE"] = str(req["voice"])
+        # Summarizing runs here too, so a remote session needs no model of
+        # its own -- the same reason synthesis runs here.
+        argv = [SPEAK]
+        if req.get("summarize"):
+            argv.append("--summarize")
+        if req.get("translate"):
+            argv.append("--translate")
+        argv += ["--text", text]
         try:
             # Detached: answer immediately so the remote turn is never held
             # open for the length of the audio.
-            subprocess.Popen([SPEAK, "--text", text], env=env,
+            subprocess.Popen(argv, env=env,
                              stdout=subprocess.DEVNULL,
                              stderr=None if os.environ.get("CLAUDE_TTS_DEBUG")
                              else subprocess.DEVNULL)

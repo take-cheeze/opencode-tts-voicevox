@@ -26,7 +26,16 @@ jobs:
 
       - name: Install (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -y && sudo apt-get install -y build-essential unzip ffmpeg
+        # --no-install-recommends on ffmpeg alone: unqualified `apt-get
+        # install ffmpeg` drags in ~100 packages / 94 MB via Recommends --
+        # VA-API/VDPAU GPU drivers, a pocketsphinx speech model, the full
+        # codec zoo -- none of which this workflow's ffmpeg -codec:a
+        # libmp3lame transcode touches. That alone was ~6 of this job's ~6.5
+        # minutes.
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential unzip
+          sudo apt-get install -y --no-install-recommends ffmpeg
 
       - name: Install (macOS)
         if: runner.os == 'macOS'

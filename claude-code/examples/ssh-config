@@ -1,0 +1,18 @@
+# ~/.ssh/config on the machine with the speakers.
+# The remote end needs no models, no voice assets, no ffmpeg, no audio device.
+
+Host remote
+  RemoteForward 17999 localhost:17999
+
+  # Reap a dead peer in ~90s. Without this, a host that crashes leaves the port
+  # bound to a session whose client is gone, and every later connection logs
+  # "remote port forwarding failed" then runs silently with no tunnel.
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+
+  # Only if you open several sessions at once, or each will try to bind the
+  # same port and all but the first will fail. Skip it on hosts that see bulk
+  # rsync/scp -- one multiplexed connection can cost throughput there.
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%C
+  ControlPersist 10m

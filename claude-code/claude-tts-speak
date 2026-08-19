@@ -6,6 +6,15 @@ the last assistant text out of the session transcript, reduce it to something
 worth hearing, and hand it to opencode-tts-dispatch (CJK -> VOICEVOX, else
 -> voiceger).
 
+Optionally also a UserPromptSubmit hook (--user-prompt): speaks what *you*
+typed, in a different VOICEVOX voice (CLAUDE_TTS_USER_VOICE) than whatever
+speaks Claude's replies, so the two are never confusable. Since VOICEVOX only
+understands Japanese, non-Japanese prompts are translated first with the same
+self-hosted endpoint --summarize already uses -- no separate model to run.
+UserPromptSubmit blocks prompt submission until the hook command exits (no
+async support), so this mode does its real work in a detached child and
+returns immediately.
+
 Over SSH, the models and the speakers are on the machine you are sitting at,
 not the one running Claude. If a claude-tts-speakd is reachable (normally
 through `RemoteForward 17999 localhost:17999`), the *text* is sent there and
@@ -27,16 +36,33 @@ Environment:
                         unset auto-detects one on CLAUDE_TTS_FORWARD_PORT
   CLAUDE_TTS_FORWARD_PORT  loopback port to probe (default 17999)
   CLAUDE_TTS_TOKEN      shared secret, if the receiver requires one
+  CLAUDE_TTS_SUMMARY_URL   comma-separated OpenAI-compatible endpoints, tried in
+                        order, so summarizing can be offloaded to a beefier box
+                        and still fall back when it is down. Each entry may
+                        carry its own model after a "#":
+                          http://gpubox:11434/v1#qwen2.5:7b,http://127.0.0.1:11434/v1
+  CLAUDE_TTS_SUMMARY_MODEL default model for entries that do not name one
+  CLAUDE_TTS_SUMMARY_CLAUDE 1 to fall back to the claude CLI (an API call);
+                        off by default, so nothing leaves the machine
+  CLAUDE_TTS_SUMMARIZER path to the claude CLI (default: found on PATH)
+  CLAUDE_TTS_USER_VOICE which voice speaks your own prompts (--user-prompt);
+                        unset disables the feature entirely, e.g. "metan"
+  CLAUDE_TTS_TRANSLATE_TO target language for --translate  (default Japanese)
+  CLAUDE_TTS_PROMPT_MAXCHARS cap on how much of a prompt gets spoken (default 200)
+  CLAUDE_TTS_INHIBIT    1 to make this a no-op -- set on the summarizer child
+                        so its own Stop hook cannot start a speak/summarize loop
   CLAUDE_TTS_DEBUG      1 to report why nothing was spoken
 """
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HOME = os.path.expanduser("~")
@@ -50,9 +76,50 @@ STATE = os.path.join(tempfile.gettempdir(), "claude-tts-speak.pid")
 FORWARD = os.environ.get("CLAUDE_TTS_FORWARD", "")
 FORWARD_PORT = os.environ.get("CLAUDE_TTS_FORWARD_PORT", "17999")
 TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
+NOTIFY_FALLBACK = os.environ.get("CLAUDE_TTS_NOTIFY_FALLBACK", "確認をお願いするのだ。")
+NOTIFY_MAXCHARS = int(os.environ.get("CLAUDE_TTS_NOTIFY_MAXCHARS", "90"))
+SUMMARY_TIMEOUT = float(os.environ.get("CLAUDE_TTS_SUMMARY_TIMEOUT", "90"))
+USER_VOICE = os.environ.get("CLAUDE_TTS_USER_VOICE", "")
+TRANSLATE_TO = os.environ.get("CLAUDE_TTS_TRANSLATE_TO", "Japanese")
+PROMPT_MAXCHARS = int(os.environ.get("CLAUDE_TTS_PROMPT_MAXCHARS", "200"))
+def _summary_endpoints():
+    """[(url, model)] in preference order, from a comma-separated setting."""
+    out = []
+    for entry in os.environ.get("CLAUDE_TTS_SUMMARY_URL", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        url, _, model = entry.partition("#")
+        out.append((url.rstrip("/"), model.strip()))
+    return out
+
+
+SUMMARY_ENDPOINTS = _summary_endpoints()
+SUMMARY_MODEL = os.environ.get("CLAUDE_TTS_SUMMARY_MODEL", "")
+SUMMARY_CLAUDE = os.environ.get("CLAUDE_TTS_SUMMARY_CLAUDE") == "1"
+SUMMARIZER = os.environ.get("CLAUDE_TTS_SUMMARIZER") or shutil.which("claude")
+SUMMARY_PROMPT = (
+    "Summarize the following assistant response as spoken audio copy in 2 short "
+    "sentences. Keep concrete facts, decisions, and next actions. Do not mention "
+    "that this is a summary. No markdown, no bullets, no preamble, plain text only."
+)
+TRANSLATE_PROMPT = (
+    "Translate the following text into natural, casual spoken %s. Output ONLY "
+    "the translation -- no romanization, no notes, no quotation marks, no "
+    "preamble." % TRANSLATE_TO
+)
 
 # Terminators for both scripts; CJK stops double as sentence ends.
 SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+|(?<=[。！？])")
+
+# Kana / CJK Han / Hangul -- mirrors opencode-tts-dispatch's has_cjk(), kept
+# local rather than imported since the two scripts ship and run independently.
+def has_cjk(text):
+    for ch in text:
+        o = ord(ch)
+        if 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF or 0xAC00 <= o <= 0xD7AF:
+            return True
+    return False
 
 
 def debug(msg):
@@ -185,9 +252,160 @@ def forward_target():
     return None
 
 
-def forward(text, target):
+def reachable(url, timeout=1.0):
+    """Cheap TCP probe, so an offloaded box that is down costs a second, not a
+    generation timeout. This one crashes regularly; skipping it must be fast."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        with socket.create_connection((parts.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def summarize_via_api(text, url, model):
+    """Summarize with a self-hosted OpenAI-compatible endpoint. None on failure.
+
+    max_tokens is deliberately generous: a reasoning model spends its budget on
+    reasoning_content first, and a tight cap returns an empty `content` with
+    finish_reason "stop" -- success-shaped, useless.
+    """
+    body = json.dumps({
+        "model": model or SUMMARY_MODEL or "default",
+        "messages": [{"role": "user",
+                      "content": SUMMARY_PROMPT + "\n\n" + text}],
+        "max_tokens": 2048,
+        "temperature": 0.3,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(url + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=SUMMARY_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = (data["choices"][0]["message"].get("content") or "").strip()
+        # Some local builds emit the chain of thought inline rather than in a
+        # separate field.
+        out = re.sub(r"<think>.*?</think>", " ", out, flags=re.S).strip()
+        if out:
+            return out
+        debug("summary endpoint %s returned empty content" % url)
+    except Exception as exc:
+        debug("summary endpoint %s failed (%s)" % (url, exc))
+    return None
+
+
+def summarize_via_claude(text):
+    if not SUMMARIZER or not os.path.isfile(SUMMARIZER):
+        debug("no claude CLI for summarizing; truncating instead")
+        return None
+    env = dict(os.environ)
+    # The summarizer is itself a claude session and will fire its own Stop
+    # hook when it exits. Without this it would speak, and summarize, forever.
+    env["CLAUDE_TTS_INHIBIT"] = "1"
+    try:
+        proc = subprocess.run([SUMMARIZER, "-p", SUMMARY_PROMPT],
+                              input=text, capture_output=True, text=True,
+                              env=env, timeout=SUMMARY_TIMEOUT)
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and out:
+            return out
+        debug("summarizer rc=%d" % proc.returncode)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        debug("summarizer failed (%s)" % exc)
+    return None
+
+
+def summarize(text):
+    """Reduce a full response to speakable copy.
+
+    Order matters: a self-hosted endpoint first, so nothing leaves the machine.
+    The claude CLI is a real API call and stays opt-in. Extractive truncation is
+    the floor -- a slightly clumsy sentence beats silence, and it needs nothing.
+    """
+    for url, model in SUMMARY_ENDPOINTS:
+        if not reachable(url):
+            debug("summary endpoint %s unreachable, skipping" % url)
+            continue
+        out = summarize_via_api(text, url, model)
+        if out:
+            debug("summarized via %s" % url)
+            return speakable(out)
+    if SUMMARY_CLAUDE:
+        out = summarize_via_claude(text)
+        if out:
+            return speakable(out)
+    debug("no summarizer available; truncating")
+    return speakable(text)
+
+
+def translate_via_api(text, url, model):
+    """Same self-hosted endpoint --summarize uses, different prompt. None on
+    failure -- reuses summarize_via_api's request shape almost verbatim, but
+    kept separate rather than parameterized: the two have different failure
+    semantics (summarize falls back to truncation, translate falls back to
+    silence), so sharing one function would just grow a branch for that."""
+    body = json.dumps({
+        "model": model or SUMMARY_MODEL or "default",
+        "messages": [{"role": "user",
+                      "content": TRANSLATE_PROMPT + "\n\n" + text}],
+        "max_tokens": 1024,
+        "temperature": 0.2,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(url + "/chat/completions", data=body,
+                                 headers={"Content-Type": "application/json"},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=SUMMARY_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = (data["choices"][0]["message"].get("content") or "").strip()
+        out = re.sub(r"<think>.*?</think>", " ", out, flags=re.S).strip()
+        out = out.strip("\"「」")  # some models wrap the answer in quotes anyway
+        if out:
+            return out
+        debug("translate endpoint %s returned empty content" % url)
+    except Exception as exc:
+        debug("translate endpoint %s failed (%s)" % (url, exc))
+    return None
+
+
+def translate(text):
+    """Japanese-ify text for a VOICEVOX voice, via the same self-hosted
+    endpoint(s) as --summarize -- no separate model to run just for this.
+
+    Unlike summarize(), there is no truncation fallback: Open JTalk
+    mis-synthesizing English as if it were Japanese sounds like noise, and
+    silence beats that.
+    """
+    if has_cjk(text):
+        return text
+    for url, model in SUMMARY_ENDPOINTS:
+        if not reachable(url):
+            debug("translate endpoint %s unreachable, skipping" % url)
+            continue
+        out = translate_via_api(text, url, model)
+        if out and has_cjk(out):
+            debug("translated via %s" % url)
+            return out
+        if out:
+            # A small model asked to translate sometimes just answers in
+            # English instead -- success-shaped, but not Japanese, and
+            # speaking it would silently fall through to voiceger's single
+            # English voice instead of the VOICEVOX one this was for.
+            debug("translate endpoint %s returned non-Japanese output, "
+                  "treating as failed: %r" % (url, out))
+    debug("no translation endpoint available")
+    return None
+
+
+def forward(text, target, summarize_remotely=False, translate_remotely=False):
     """Hand the text to the receiver. True if it accepted responsibility."""
-    body = json.dumps({"text": text, "rate": RATE, "voice": VOICE}).encode("utf-8")
+    body = json.dumps({"text": text, "rate": RATE, "voice": VOICE,
+                       "summarize": bool(summarize_remotely),
+                       "translate": bool(translate_remotely)}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if TOKEN:
         headers["X-TTS-Token"] = TOKEN
@@ -237,6 +455,76 @@ def speak_local(text):
             pass
 
 
+def text_from_notification():
+    """Turn a Notification hook payload into something worth hearing.
+
+    Claude Code sends this when it is waiting on you -- a question, or a
+    permission prompt. The payload wording is the informative part, so speak it
+    rather than a fixed phrase, but keep it short: this is an alert, and a long
+    English sentence takes ten seconds to synthesize.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+    if os.environ.get("CLAUDE_TTS_DEBUG") == "1":
+        # The exact shape is not documented; keep a copy to refine against.
+        try:
+            with open(os.path.join(tempfile.gettempdir(),
+                                   "claude-tts-notify.json"), "w") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    msg = ""
+    for key in ("message", "title", "body", "notification", "reason"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            msg = val.strip()
+            break
+    if not msg:
+        tool = payload.get("tool_name") or ""
+        msg = ("%s の確認をお願いするのだ。" % tool) if tool else NOTIFY_FALLBACK
+
+    msg = re.sub(r"\s+", " ", msg).strip()
+    if len(msg) > NOTIFY_MAXCHARS:
+        msg = msg[:NOTIFY_MAXCHARS].rsplit(" ", 1)[0]
+    return msg
+
+
+def speak_user_prompt():
+    """UserPromptSubmit entry point.
+
+    This hook has no async support -- Claude Code waits for the command to
+    exit before your turn starts -- so the real work (translate, synthesize,
+    play) happens in a detached child, and this returns in well under the
+    time a python3 interpreter takes to start. It must also print nothing:
+    Claude Code folds a UserPromptSubmit hook's stdout into the turn's
+    context, which is not where a debug line belongs.
+    """
+    if not USER_VOICE:
+        return  # feature is off unless a distinct voice is configured
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+    text = (payload.get("prompt") or "").strip()
+    if not text:
+        return
+    text = re.sub(r"\s+", " ", text)[:PROMPT_MAXCHARS]
+
+    env = dict(os.environ)
+    env["CLAUDE_TTS_VOICE"] = USER_VOICE
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--translate",
+             "--text", text],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        debug("could not detach user-prompt speaker: %s" % exc)
+
+
 def text_from_hook():
     try:
         payload = json.load(sys.stdin)
@@ -251,13 +539,37 @@ def text_from_hook():
 
 
 def main():
+    if os.environ.get("CLAUDE_TTS_INHIBIT") == "1":
+        # We are inside the summarizer's own claude session; speaking here is
+        # what would turn one summary into an endless chain of them.
+        debug("inhibited")
+        return
+
     # --text speaks the given words directly; that is how claude-tts-speakd
-    # re-enters this script after receiving a forwarded request.
-    if len(sys.argv) > 2 and sys.argv[1] == "--text":
-        text = " ".join(sys.argv[2:]).strip()
-    elif len(sys.argv) > 1:
-        sys.stderr.write("usage: claude-tts-speak [--text WORDS]   "
-                         "(hook payload on stdin otherwise)\n")
+    # re-enters this script after receiving a forwarded request, and how
+    # speak_user_prompt()'s detached child re-enters it too.
+    # --summarize first reduces them with the claude CLI, wherever the audio is.
+    # --translate Japanese-ifies them for a VOICEVOX voice, same endpoint.
+    argv = sys.argv[1:]
+    want_summary = False
+    if "--summarize" in argv:
+        want_summary = True
+        argv = [a for a in argv if a != "--summarize"]
+    want_translate = False
+    if "--translate" in argv:
+        want_translate = True
+        argv = [a for a in argv if a != "--translate"]
+
+    if argv and argv[0] == "--user-prompt":
+        return speak_user_prompt()
+    if argv and argv[0] == "--notify":
+        text = text_from_notification()
+    elif len(argv) > 1 and argv[0] == "--text":
+        text = " ".join(argv[1:]).strip()
+    elif argv:
+        sys.stderr.write("usage: claude-tts-speak [--summarize] [--translate] "
+                         "[--text WORDS | --notify | --user-prompt]   "
+                         "(Stop hook payload on stdin otherwise)\n")
         return
     else:
         text = text_from_hook()
@@ -267,9 +579,25 @@ def main():
         return
 
     target = forward_target()
-    if target and forward(text, target):
-        debug("forwarded to %s" % target)
-        return
+    if target:
+        # Summarizing and translating both happen at the receiver, so the
+        # sending host needs no model -- the same reason synthesis does.
+        if forward(text, target, summarize_remotely=want_summary,
+                   translate_remotely=want_translate):
+            debug("forwarded to %s (summarize=%s translate=%s)"
+                  % (target, want_summary, want_translate))
+            return
+
+    if want_translate:
+        text = translate(text)
+        if not text:
+            debug("translation unavailable or failed")
+            return
+    if want_summary:
+        text = summarize(text)
+        if not text:
+            debug("summary was empty")
+            return
     speak_local(text)
 
 
