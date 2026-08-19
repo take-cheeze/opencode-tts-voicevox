@@ -57,10 +57,12 @@ TS="$(find_tailscale)" || {
 }
 
 if [ "$ACTION" = off ]; then
-  "$TS" funnel "$PORT" off
-  echo "setup-tunnel: funnel for port $PORT disabled. claude-tts-speakd is" \
-       "still running (untouched) and CLAUDE_TTS_TOKEN is still whatever" \
-       "you had set -- this only closes the public path to it."
+  # "funnel reset" clears the whole funnel config, not just this port; that's
+  # fine since setup-tunnel.sh only ever sets up one.
+  "$TS" funnel reset
+  echo "setup-tunnel: funnel disabled. claude-tts-speakd is still running" \
+       "(untouched) and CLAUDE_TTS_TOKEN is still whatever you had set --" \
+       "this only closes the public path to it."
   exit 0
 fi
 
@@ -85,7 +87,13 @@ not run open. This token is NOT saved anywhere by this script:
 You need it in two places:
   1. Wherever claude-tts-speakd runs, as an environment variable (its
      launchd plist / systemd unit -- see claude-code/README.md), then
-     restart it.
+     reload it. On macOS, 'launchctl kickstart -k' restarts the process
+     but does NOT pick up a changed EnvironmentVariables block -- use:
+       launchctl bootout gui/\$(id -u)/com.opencode-tts.speakd
+       launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.opencode-tts.speakd.plist
+     On Linux there's no shipped systemd unit for claude-tts-speakd yet
+     (only voiceger has one) -- however you're running it, restart the
+     process with CLAUDE_TTS_TOKEN in its environment.
   2. The Claude Code Web environment (claude.ai/code -> environment
      selector -> your environment -> Environment variables), so the hook
      can authenticate. See "Next steps" below for the exact lines.

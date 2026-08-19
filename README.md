@@ -93,6 +93,36 @@ on Linux, a launchd user agent on macOS:
   `voiceger/com.opencode-tts.voiceger.plist` (macOS) keep the server running;
   `install.sh` bakes your checkout path into whichever one applies.
 
+## Resource usage
+
+Measured on an Apple **M4 Mac mini** (10 cores: 4P+6E, 16 GB RAM), all CPU
+paths — nothing here uses the M4's GPU except the optional Ollama
+summarizer. Your numbers will vary with text length, core count, and
+whether a component is cold (first call after startup) or warm.
+
+| Component | Model | Peak RSS | GPU | Time |
+|---|---|---|---|---|
+| `opencode-tts-voicevox` (per-invocation CLI) | short (6 chars) | 420 MB | none (CPU) | 0.9 s |
+| | medium (40 chars) | 550 MB | none (CPU) | 1.9 s |
+| | long (~80 chars) | 840 MB | none (CPU) | 2.9 s |
+| `voiceger` (`tts_server.py`, persistent) | idle | 43 MB | none (CPU¹) | — |
+| | warm request, short sentence | 1.4 GB | none (CPU¹) | 2.1 s |
+| | warm request, longer sentence | 1.6 GB | none (CPU¹) | 4.2 s |
+| Ollama summarizer (`qwen2.5:1.5b`, persistent) | cold (loads into GPU) | 1.1 GB² | 100% | 3.2 s |
+| | warm | 1.1 GB² | 100% | 0.7 s |
+| `claude-tts-speakd` (idle daemon) | — | 6 MB | none | — |
+
+¹ voiceger defaults to CPU on macOS (`VOICEGER_DEVICE=mps` is opt-in — see
+[Notes & caveats](#notes--caveats)); CPU briefly spikes to 200-240% (2-2.4
+cores) during a request. ² GPU-resident via Metal, from `ollama ps`, not
+counted in the `ollama serve` process's own RSS.
+
+The VOICEVOX CLI figure includes fixed per-invocation startup (dlopen,
+ONNX Runtime init, Open JTalk dictionary, model load) — roughly 400 MB and
+0.7-0.9 s before any text-dependent cost, since it is a one-shot process
+rather than a resident server. voiceger and Ollama pay a similar one-time
+cost only on the *first* request after their model loads.
+
 ## Notes & caveats
 
 - **GPU**: on Linux, torch 2.1.2 (cu121) predates Blackwell; an RTX 5050
