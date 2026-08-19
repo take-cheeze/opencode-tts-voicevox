@@ -28,7 +28,7 @@
          Unset these and it falls back to extractive truncation, never to an
          API provider unless CLAUDE_TTS_SUMMARY_CLAUDE=1 is set explicitly. -->
     <key>CLAUDE_TTS_SUMMARY_URL</key><string>http://127.0.0.1:11434/v1</string>
-    <key>CLAUDE_TTS_SUMMARY_MODEL</key><string>qwen2.5:3b</string>
+    <key>CLAUDE_TTS_SUMMARY_MODEL</key><string>qwen2.5:1.5b</string>
   </dict>
 
   <key>RunAtLoad</key><true/>

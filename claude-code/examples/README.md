@@ -108,7 +108,7 @@ deliberate — the default never reaches an API provider:
 ```sh
 # 1. self-hosted, preferred: nothing leaves the machine
 CLAUDE_TTS_SUMMARY_URL=http://127.0.0.1:11434/v1   # ollama
-CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:3b
+CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:1.5b
 
 # 2. opt-in only, this is a real API call
 # CLAUDE_TTS_SUMMARY_CLAUDE=1
@@ -117,7 +117,15 @@ CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:3b
 ```
 
 Any OpenAI-compatible endpoint works — `ollama`, `llama-server`,
-`mlx_lm.server`. If you point it at a *reasoning* model, leave `max_tokens`
+`mlx_lm.server`.
+
+On model size, measured on an M4 over four technical samples: `0.5b` fabricates
+(it invented a shell command that does not exist) and is not usable here;
+`1.5b` is accurate enough at 1.1 GB resident; `3b` is the most faithful at
+2.1 GB but ignored the two-sentence instruction more often. Summarizing is a
+second or two either way — synthesis dominates the wall clock — so the real
+tradeoff is memory, not speed. All sizes garble causality occasionally: treat
+the audio as a nudge, not a record. If you point it at a *reasoning* model, leave `max_tokens`
 generous: the budget goes to `reasoning_content` first, and a tight cap returns
 an empty `content` with `finish_reason: "stop"` — success-shaped and useless.
 
