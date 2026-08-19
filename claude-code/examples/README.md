@@ -110,6 +110,10 @@ deliberate — the default never reaches an API provider:
 CLAUDE_TTS_SUMMARY_URL=http://127.0.0.1:11434/v1   # ollama
 CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:1.5b
 
+# offload to a beefier box, keeping the local one as fallback. Entries are
+# tried in order and may carry their own model after a "#":
+# CLAUDE_TTS_SUMMARY_URL=http://gpubox:11434/v1#qwen2.5:7b,http://127.0.0.1:11434/v1
+
 # 2. opt-in only, this is a real API call
 # CLAUDE_TTS_SUMMARY_CLAUDE=1
 
@@ -118,6 +122,16 @@ CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:1.5b
 
 Any OpenAI-compatible endpoint works — `ollama`, `llama-server`,
 `mlx_lm.server`.
+
+Endpoints are probed with a one-second TCP connect before use, so a box that is
+down costs a second rather than a generation timeout — worth having if the
+remote is a machine that reboots on its own. If every endpoint fails it falls
+through to extractive truncation rather than hanging.
+
+Offloading only pays if the remote runs a *faster* model than the local one.
+Measured here, pointing at a remote reasoning model made a summary take 27s
+against 8.6s locally: the GPU was never the bottleneck, the reasoning tokens
+were.
 
 On model size, measured on an M4 over four technical samples: `0.5b` fabricates
 (it invented a shell command that does not exist) and is not usable here;
