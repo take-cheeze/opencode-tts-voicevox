@@ -3,12 +3,10 @@
 #
 #   setup-voiceger.sh [--clone-src]
 #
-# Assumes the voiceger_v2 source tree.  By default it looks for one of:
-#   $VOICEGER_SRC        (set this to override)
-#   ~/dev/voiceger_v2
-#   <repo>/voiceger-src
-# If none exist and --clone-src is passed, it clones https://github.com/
-# zunzun999/voiceger_v2 into <repo>/voiceger-src.
+# Needs the voiceger_v2 source tree (~37 MiB): it vendors GPT-SoVITS,
+# LangSegment, the NLTK data and the reference audio the voice is cloned from.
+# Looked up as $VOICEGER_SRC, default ~/dev/voiceger_v2.  With --clone-src it
+# is cloned from https://github.com/zunzun999/voiceger_v2 if missing.
 #
 # Steps:
 #   1. Create a Python 3.10 venv ($VOICEGER_VENV, default ~/dev/voiceger-venv)
@@ -30,17 +28,39 @@ case "$(uname -s)" in
 esac
 VOICEGER_SRC="${VOICEGER_SRC:-$HOME/dev/voiceger_v2}"
 VOICEGER_VENV="${VOICEGER_VENV:-$HOME/dev/voiceger-venv}"
+VOICEGER_GIT="${VOICEGER_GIT:-https://github.com/zunzun999/voiceger_v2}"
 PYVER="3.10"
+
+clone_src=0
+for arg in "$@"; do
+  case "$arg" in
+    --clone-src) clone_src=1 ;;
+    *) echo "unknown argument: $arg (usage: setup-voiceger.sh [--clone-src])" >&2; exit 2 ;;
+  esac
+done
 
 echo "==> voiceger setup"
 echo "    src  : $VOICEGER_SRC"
 echo "    venv : $VOICEGER_VENV"
 
 if [[ ! -d "$VOICEGER_SRC" ]]; then
-  echo "voiceger source not found at $VOICEGER_SRC" >&2
-  echo "  (re-run with --clone-src, or set VOICEGER_SRC to your checkout)" >&2
-  exit 1
+  if [[ "$clone_src" -eq 1 ]]; then
+    echo "==> cloning $VOICEGER_GIT -> $VOICEGER_SRC"
+    mkdir -p "$(dirname "$VOICEGER_SRC")"
+    git clone --depth 1 "$VOICEGER_GIT" "$VOICEGER_SRC"
+  else
+    echo "voiceger source not found at $VOICEGER_SRC" >&2
+    echo "  (re-run with --clone-src, or set VOICEGER_SRC to your checkout)" >&2
+    exit 1
+  fi
 fi
+for required in GPT-SoVITS reference; do
+  [[ -d "$VOICEGER_SRC/$required" ]] || {
+    echo "voiceger: $VOICEGER_SRC does not look like a voiceger_v2 tree" >&2
+    echo "  (missing $required/)" >&2
+    exit 1
+  }
+done
 
 command -v uv >/dev/null || { echo "need uv (python installer) in PATH" >&2; exit 1; }
 
@@ -66,11 +86,13 @@ else
   install_pinned --index-url https://download.pytorch.org/whl/cu121 \
     "torch==2.1.2+cu121" "torchvision==0.16.2+cu121" "torchaudio==2.1.2+cu121" || true
 fi
-install_pinned -r "$REPO/requirements.txt" 2>/dev/null || \
-  install_pinned numpy==1.26.4 librosa==0.9.2 soundfile==0.14.0 scipy==1.15.3 \
-    transformers==4.51.3 fastapi uvicorn pydantic nltk wordsegment unidecode \
-    inflect g2p-en jamo g2pk2 pypinyin cn2an py3langid einops matplotlib \
-    numba llvmlite coverage setuptools pandas ffmpeg-python
+# No fallback list here on purpose: a partial install produces a venv that
+# looks fine and then dies with an opaque ModuleNotFoundError deep inside
+# GPT-SoVITS.  Fail loudly instead, with the resolver's explanation.
+if ! install_pinned -r "$REPO/requirements.txt"; then
+  echo "ERROR: could not install $REPO/requirements.txt (see resolver output above)." >&2
+  exit 1
+fi
 
 # --- pyopenjtalk (source build needs a clean env) ---------------------------
 # It compiles C++, so the build must not see Nix's CFLAGS. Rebuild PATH from

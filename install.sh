@@ -14,6 +14,8 @@
 #
 #   --skip-voiceger   do not set up the (larger) voiceger GPT-SoVITS stack;
 #                     Japanese/CJK still works via the voicevox shim.
+#   --clone-src       clone the voiceger_v2 source tree if it is missing
+#                     (forwarded to setup-voiceger.sh).
 #
 # Restart opencode afterwards to pick up the plugin config change.
 set -euo pipefail
@@ -21,6 +23,16 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
+
+SKIP_VOICEGER=0
+SETUP_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --skip-voiceger) SKIP_VOICEGER=1 ;;
+    --clone-src)     SETUP_ARGS+=("$arg") ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
 
 case "$(uname -s)" in
   Linux)  OS=linux;  LIBEXT=so    ;;
@@ -79,13 +91,17 @@ install_service_macos() {
   launchctl bootstrap "gui/$(id -u)" "$plist"
 }
 
-if [[ "${1:-}" != "--skip-voiceger" ]]; then
+if [[ "$SKIP_VOICEGER" -eq 0 ]]; then
   if [[ -x "$REPO/voiceger/setup-voiceger.sh" ]]; then
-    bash "$REPO/voiceger/setup-voiceger.sh" || {
-      echo "WARN: voiceger setup incomplete; English TTS will fall back until" >&2
-      echo "      setup-voiceger.sh finishes.  Japanese/CJK TTS is unaffected." >&2
-    }
-    if [[ "$OS" = macos ]]; then install_service_macos; else install_service_linux; fi
+    # Only register the service if setup actually succeeded — a unit pointing
+    # at a half-built venv just crash-loops on Restart=on-failure / KeepAlive.
+    if bash "$REPO/voiceger/setup-voiceger.sh" ${SETUP_ARGS+"${SETUP_ARGS[@]}"}; then
+      if [[ "$OS" = macos ]]; then install_service_macos; else install_service_linux; fi
+    else
+      echo "WARN: voiceger setup incomplete; not registering the service." >&2
+      echo "      Japanese/CJK TTS is unaffected. Re-run install.sh once the" >&2
+      echo "      setup errors above are resolved to enable English TTS." >&2
+    fi
   else
     echo "WARN: voiceger setup script missing; English will speak via edge-tts if available." >&2
   fi

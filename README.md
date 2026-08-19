@@ -27,7 +27,7 @@ untouched (summary step, slash commands, playback all work as-is).
                 │ opencode-tts-dispatch (this) │── CJK ──► opencode-tts-voicevox (C) ─► Zundamon
                 │      CJK router             │            └ VOICEVOX CORE (offline)
                 └──────────────────────────────┘
-                                       └─ English/other ─► voiceger server (:8123) ─► Zundamon
+                                       └─ English/other ─► voiceger server (:18123) ─► Zundamon
                                                               (GPT-SoVITS, CPU)
 ```
 
@@ -57,7 +57,7 @@ On macOS: `xcode-select --install && brew install ffmpeg cmake uv`.
 ```sh
 git clone https://github.com/take-cheeze/opencode-tts-voicevox
 cd opencode-tts-voicevox
-./install.sh                 # both backends
+./install.sh --clone-src     # both backends; clones voiceger_v2 if missing
 # or
 ./install.sh --skip-voiceger # Japanese/CJK only (skips the ~GB model download)
 ```
@@ -85,7 +85,9 @@ on Linux, a launchd user agent on macOS:
 ### Voiceger (English/other)
 - `voiceger/setup-voiceger.sh` creates a Python 3.10 venv, installs
   torch 2.1.2 + deps, downloads the Zundamon fine-tune + GPT-SoVITS
-  pretrained models, and installs the NLTK English tagger.
+  pretrained models (~1 GB), and installs the NLTK English tagger.
+  Pass `--clone-src` to fetch the voiceger_v2 tree (~37 MiB) if you do not
+  already have one; point `VOICEGER_SRC` at your checkout otherwise.
 - `voiceger/tts_server.py` is a FastAPI server: `POST /tts`, `GET /ping`.
 - `voiceger/opencode-tts-voiceger.service` (Linux) and
   `voiceger/com.opencode-tts.voiceger.plist` (macOS) keep the server running;
@@ -104,5 +106,14 @@ on Linux, a launchd user agent on macOS:
 - **jieba_fast / pyopenjtalk** have no clean cp310 wheels and are handled in
   `setup-voiceger.sh` (forwarder shim + clean-env build). The pyopenjtalk
   build compiles C++, so macOS needs the Xcode command line tools and `cmake`.
+- **Port**: the server listens on **18123**, not the more obvious 8123 —
+  that one collides with ClickHouse's HTTP default and, on macOS, with a
+  Visual Studio Code plugin helper. A collision is quiet and nasty: the
+  dispatcher happily POSTs summaries at whatever else answered. Override with
+  `VOICEGER_PORT` (server) and `VOICEGER_URL` (dispatcher) together.
+- **Reference audio**: voiceger clones the voice from a reference clip.
+  Upstream ships one wav per emotion rather than a single `reference.wav`,
+  so the server picks the first alphabetically (the normal-emotion take,
+  which is what `ref_text.txt` transcribes). Override with `VOICEGER_REF`.
 - **License**: audio generated with the Zundamon voice must be credited
   **VOICEVOX:ずんだもん** per [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html).

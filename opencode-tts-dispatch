@@ -12,23 +12,42 @@ via ffmpeg so mpg123 also works).
 
 Environment:
   VOICEVOX_BIN   C shim path   (default ~/.local/bin/opencode-tts-voicevox)
-  VOICEGER_URL   server base   (default http://127.0.0.1:8123)
+  VOICEGER_URL   server base   (default http://127.0.0.1:18123)
   FFMPEG_BIN     (default ffmpeg)
   VOICEGER_LANG  override the voiceger language passed to /tts
+  VOICEGER_TRIES how many times to retry a cold voiceger server (default 3)
 """
 import argparse
 import json
 import os
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 VOICEVOX = os.environ.get("VOICEVOX_BIN", os.path.expanduser("~/.local/bin/opencode-tts-voicevox"))
-VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:8123").rstrip("/")
+# 18123 rather than the obvious 8123: that one is contended (ClickHouse's HTTP
+# default, and VS Code's plugin helper grabs it on macOS), and a collision here
+# means POSTing summaries at whatever else answered.
+VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:18123").rstrip("/")
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
+TRIES = max(1, int(os.environ.get("VOICEGER_TRIES", "3")))
+RETRY_WAIT = 2.0
+SERVICE_HINT = (
+    "  check: launchctl print gui/%d/com.opencode-tts.voiceger\n"
+    "  log:   ~/Library/Logs/opencode-tts-voiceger.log" % os.getuid()
+    if sys.platform == "darwin" else
+    "  check: systemctl --user status opencode-tts-voiceger\n"
+    "  log:   journalctl --user -u opencode-tts-voiceger -e")
 # tempfile honours $TMPDIR, which on macOS is a per-user directory rather
 # than a shared /tmp.
 ERR = os.path.join(tempfile.gettempdir(), "opencode-tts-dispatch.%d.err" % os.getpid())
+
+
+def die(msg):
+    sys.stderr.write("opencode-tts-dispatch: " + msg + "\n")
+    raise SystemExit(1)
 
 
 def unlink(path):
@@ -84,17 +103,39 @@ def speak_via_voicevox(args):
     unlink(tmp)
 
 
-def speak_via_voiceger(args):
-    lang = os.environ.get("VOICEGER_LANG", "English")
-    body = json.dumps({"text": args.text, "text_language": lang}).encode("utf-8")
+def voiceger_post(body):
+    """POST /tts, retrying briefly while a cold server warms up.
+
+    Loading the GPT-SoVITS weights takes 1-2 minutes on CPU, and until that
+    finishes the port is simply refused rather than slow -- so a summary that
+    lands just after boot would otherwise fail outright.
+    """
     req = urllib.request.Request(
         VOICEGER + "/tts", data=body,
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
+    for attempt in range(TRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace").strip()
+            die("voiceger returned HTTP %d: %s" % (exc.code, detail[:400]))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            if attempt + 1 == TRIES:
+                die("cannot reach voiceger at %s (%s).\n"
+                    "  Non-CJK text needs the voiceger server; Japanese/CJK is\n"
+                    "  unaffected and still speaks via VOICEVOX.\n%s"
+                    % (VOICEGER, exc, SERVICE_HINT))
+            time.sleep(RETRY_WAIT)
+
+
+def speak_via_voiceger(args):
+    lang = os.environ.get("VOICEGER_LANG", "English")
+    body = json.dumps({"text": args.text, "text_language": lang}).encode("utf-8")
+    result = voiceger_post(body)
     path = result.get("file_path")
     if not path or not os.path.exists(path):
-        raise SystemExit("voiceger returned no usable audio: %r" % (result,))
+        die("voiceger returned no usable audio: %r" % (result,))
     mp3(path, args.out)
     unlink(path)
 
