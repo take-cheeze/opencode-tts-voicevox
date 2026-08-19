@@ -199,6 +199,11 @@ touching `claude-tts-speakd` or your token.
 | `CLAUDE_TTS_USER_VOICE` | unset | which voice speaks your prompts (`--user-prompt`); unset disables it |
 | `CLAUDE_TTS_TRANSLATE_TO` | `Japanese` | `--translate` / `--user-prompt` target language |
 | `CLAUDE_TTS_PROMPT_MAXCHARS` | `200` | cap on how much of a prompt gets spoken |
+| `CLAUDE_TTS_SUMMARY_URL` | unset | self-hosted OpenAI-compatible endpoint(s) for `--summarize`/`--translate`; see `examples/README.md` |
+| `CLAUDE_TTS_SUMMARY_MODEL` | unset | model for endpoints in `CLAUDE_TTS_SUMMARY_URL` that don't name their own |
+| `CLAUDE_TTS_SUMMARY_CLAUDE` | unset | `1` to fall back to the `claude` CLI -- a real API call, opt-in |
+| `CLAUDE_TTS_SUMMARY_OPENCODE` | unset | `1` to fall back to `opencode run` -- also a real API call, tried after `CLAUDE_TTS_SUMMARY_CLAUDE` |
+| `CLAUDE_TTS_OPENCODE_BIN` | found on `PATH` | path to the `opencode` CLI |
 | `CLAUDE_TTS_DISPATCH` | `~/.local/bin/opencode-tts-dispatch` | dispatcher path |
 | `CLAUDE_TTS_PLAYER` | `afplay`, else `ffplay`/`mpg123`/`mpv` | audio player |
 | `CLAUDE_TTS_DEBUG` | unset | `1` reports why nothing was spoken |

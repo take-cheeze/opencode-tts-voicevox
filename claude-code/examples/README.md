@@ -142,11 +142,22 @@ CLAUDE_TTS_SUMMARY_MODEL=qwen2.5:1.5b
 # 2. opt-in only, this is a real API call
 # CLAUDE_TTS_SUMMARY_CLAUDE=1
 
-# 3. neither: extractive truncation, needs nothing
+# 3. also opt-in, also a real API call, tried after CLAUDE_TTS_SUMMARY_CLAUDE
+#    -- whatever provider `opencode` is authenticated with
+# CLAUDE_TTS_SUMMARY_OPENCODE=1
+
+# 4. none of the above: extractive truncation, needs nothing
 ```
 
 Any OpenAI-compatible endpoint works — `ollama`, `llama-server`,
 `mlx_lm.server`.
+
+`CLAUDE_TTS_SUMMARY_OPENCODE` shells out to `opencode run --format json`
+(the default, TTY-oriented format doesn't reliably deliver text over a
+plain pipe, only the JSON event stream does) and reuses the `opencode`
+you already have configured — no separate credential to set up, but a
+real, billed call every time it's the tier that ends up answering.
+Override the binary with `CLAUDE_TTS_OPENCODE_BIN` if it's not on `PATH`.
 
 Endpoints are probed with a one-second TCP connect before use, so a box that is
 down costs a second rather than a generation timeout — worth having if the

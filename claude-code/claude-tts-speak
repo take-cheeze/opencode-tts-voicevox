@@ -45,6 +45,15 @@ Environment:
   CLAUDE_TTS_SUMMARY_CLAUDE 1 to fall back to the claude CLI (an API call);
                         off by default, so nothing leaves the machine
   CLAUDE_TTS_SUMMARIZER path to the claude CLI (default: found on PATH)
+  CLAUDE_TTS_SUMMARY_OPENCODE 1 to fall back to `opencode run` (an API call
+                        through whatever provider opencode is authenticated
+                        with -- real cost, real quota); off by default, tried
+                        after CLAUDE_TTS_SUMMARY_CLAUDE
+  CLAUDE_TTS_OPENCODE_BIN path to the opencode CLI (default: found on PATH)
+  CLAUDE_TTS_OPENCODE_MODEL provider/model for `opencode run -m`
+                        (default: opencode-go/mimo-v2.5, the cheapest
+                        opencode-go model that doesn't require opting into
+                        data collection)
   CLAUDE_TTS_USER_VOICE which voice speaks your own prompts (--user-prompt);
                         unset disables the feature entirely, e.g. "metan"
   CLAUDE_TTS_TRANSLATE_TO target language for --translate  (default Japanese)
@@ -98,6 +107,12 @@ SUMMARY_ENDPOINTS = _summary_endpoints()
 SUMMARY_MODEL = os.environ.get("CLAUDE_TTS_SUMMARY_MODEL", "")
 SUMMARY_CLAUDE = os.environ.get("CLAUDE_TTS_SUMMARY_CLAUDE") == "1"
 SUMMARIZER = os.environ.get("CLAUDE_TTS_SUMMARIZER") or shutil.which("claude")
+SUMMARY_OPENCODE = os.environ.get("CLAUDE_TTS_SUMMARY_OPENCODE") == "1"
+OPENCODE_BIN = os.environ.get("CLAUDE_TTS_OPENCODE_BIN") or shutil.which("opencode")
+# Cheapest opencode-go model that doesn't require an explicit data-collection
+# opt-in (muse-spark-1.2 is nominally cheaper but 403s without one) -- picked
+# by $/token, not quality; override for anything more discerning.
+OPENCODE_MODEL = os.environ.get("CLAUDE_TTS_OPENCODE_MODEL", "opencode-go/mimo-v2.5")
 SUMMARY_PROMPT = (
     "Summarize the following assistant response as spoken audio copy in 2 short "
     "sentences. Keep concrete facts, decisions, and next actions. Do not mention "
@@ -318,6 +333,58 @@ def summarize_via_claude(text):
     return None
 
 
+def opencode_run(prompt, text):
+    """Shell out to `opencode run`, an API call through whatever provider
+    opencode is authenticated with. None on failure. Shared by summarize and
+    translate: the invocation is identical, only the prompt differs.
+
+    --format json rather than the default: default is written for a TTY (a
+    live-updating spinner over ANSI escapes) and does not reliably deliver
+    the final text over a plain pipe, so this parses the newline-delimited
+    JSON event stream instead and keeps the "text" parts.
+    """
+    if not OPENCODE_BIN or not os.path.isfile(OPENCODE_BIN):
+        debug("no opencode CLI for this backend")
+        return None
+    argv = [OPENCODE_BIN, "run", "--format", "json"]
+    if OPENCODE_MODEL:
+        argv += ["-m", OPENCODE_MODEL]
+    argv.append(prompt + "\n\n" + text)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=SUMMARY_TIMEOUT)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        debug("opencode CLI failed (%s)" % exc)
+        return None
+    if proc.returncode != 0:
+        debug("opencode CLI rc=%d: %s" % (proc.returncode, (proc.stderr or "")[:200]))
+        return None
+
+    # A part's text is its current state, not a delta -- later events for the
+    # same part id replace rather than append, same as the opencode plugin's
+    # own message.part.updated handling.
+    parts, order = {}, []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if ev.get("type") != "text":
+            continue
+        part = ev.get("part") or {}
+        pid = part.get("id")
+        if pid not in parts:
+            order.append(pid)
+        parts[pid] = part.get("text", "")
+    out = "\n".join(parts[pid] for pid in order if parts[pid].strip()).strip()
+    if not out:
+        debug("opencode CLI produced no text part")
+    return out or None
+
+
 def summarize(text):
     """Reduce a full response to speakable copy.
 
@@ -336,6 +403,11 @@ def summarize(text):
     if SUMMARY_CLAUDE:
         out = summarize_via_claude(text)
         if out:
+            return speakable(out)
+    if SUMMARY_OPENCODE:
+        out = opencode_run(SUMMARY_PROMPT, text)
+        if out:
+            debug("summarized via opencode")
             return speakable(out)
     debug("no summarizer available; truncating")
     return speakable(text)
@@ -397,6 +469,14 @@ def translate(text):
             # English voice instead of the VOICEVOX one this was for.
             debug("translate endpoint %s returned non-Japanese output, "
                   "treating as failed: %r" % (url, out))
+    if SUMMARY_OPENCODE:
+        out = opencode_run(TRANSLATE_PROMPT, text)
+        if out and has_cjk(out):
+            debug("translated via opencode")
+            return out
+        if out:
+            debug("opencode returned non-Japanese output, treating as "
+                  "failed: %r" % out)
     debug("no translation endpoint available")
     return None
 
