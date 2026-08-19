@@ -19,6 +19,9 @@ ffmpeg -- only this script.
 Environment:
   TTS_FORWARD    receiver URL, or "off" to always synthesize locally;
                  unset auto-detects one on TTS_FORWARD_PORT
+  TTS_FORWARD_MODE  "speak" (default): the receiver synthesizes AND plays, and
+                 --write-media gets a silent stub for the caller to play.
+                 "synth": the audio comes back and the caller plays it.
   TTS_FORWARD_PORT  loopback port to probe (default 17999)
   TTS_TOKEN      shared secret, if the receiver requires one
   VOICEVOX_BIN   C shim path   (default ~/.local/bin/opencode-tts-voicevox)
@@ -28,6 +31,7 @@ Environment:
   VOICEGER_TRIES how many times to retry a cold voiceger server (default 3)
 """
 import argparse
+import base64
 import json
 import os
 import sys
@@ -44,6 +48,7 @@ VOICEGER = os.environ.get("VOICEGER_URL", "http://127.0.0.1:18123").rstrip("/")
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 TRIES = max(1, int(os.environ.get("VOICEGER_TRIES", "3")))
 FORWARD = os.environ.get("TTS_FORWARD", "")
+FORWARD_MODE = os.environ.get("TTS_FORWARD_MODE", "speak").lower()
 FORWARD_PORT = os.environ.get("TTS_FORWARD_PORT", "17999")
 TTS_TOKEN = os.environ.get("TTS_TOKEN", "")
 RETRY_WAIT = 2.0
@@ -167,6 +172,21 @@ def speak_via_voiceger(args):
     unlink(path)
 
 
+# 357 bytes of valid, silent MP3. In "speak" mode the receiver has already
+# played the audio, but callers like the opencode-tts plugin still expect a
+# file at --write-media and will play whatever is there -- so give them
+# something real and inaudible rather than a zero-byte file they would choke on.
+SILENT_MP3_B64 = (
+    "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjEyLjEwMgAAAAAAAAAAAAAA//OEwAAA"
+    "AAAAAAAAAEluZm8AAAAPAAAABQAAATgAsbGxsbGxsbGxsbGxsbGxsbGxscTExMTExMTE"
+    "xMTExMTExMTExMTE2NjY2NjY2NjY2NjY2NjY2NjY2Njs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs"
+    "7P//////////////////////////AAAAAExhdmM2Mi4yOAAAAAAAAAAAAAAAACQEUAAA"
+    "AAAAAAE4P2gRBQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//MUxAAAAANIAAAAAExBTUUz"
+    "LjEwMFVV//MUxAsAAANIAAAAAFVVVVVVVVVVVVVV//MUxBYAAANIAAAAAFVVVVVVVVVV"
+    "VVVV//MUxCEAAANIAAAAAFVVVVVVVVVVVVVV//MUxCwAAANIAAAAAFVVVVVVVVVVVVVV"
+)
+
+
 def forward_target():
     """Receiver that should synthesize for us, or None to do it here.
 
@@ -187,15 +207,43 @@ def forward_target():
     return None
 
 
-def synth_via_forward(args, target):
-    """Fetch finished audio from the receiver. True if args.out was written."""
+def forward_request(target, endpoint, args):
     body = json.dumps({"text": args.text, "rate": args.rate,
                        "volume": args.volume, "voice": args.voice}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if TTS_TOKEN:
         headers["X-TTS-Token"] = TTS_TOKEN
-    req = urllib.request.Request(target + "/synth", data=body,
-                                 headers=headers, method="POST")
+    return urllib.request.Request(target + endpoint, data=body,
+                                  headers=headers, method="POST")
+
+
+def speak_via_forward(args, target):
+    """Let the receiver synthesize and play. True if args.out was written.
+
+    One hop: the audio never comes back. Without this the sound crosses the
+    link twice -- down as MP3, back up as decoded PCM through whatever the
+    caller plays it with.
+    """
+    try:
+        with urllib.request.urlopen(forward_request(target, "/speak", args),
+                                    timeout=30) as resp:
+            resp.read()
+        with open(args.out, "wb") as fh:
+            fh.write(base64.b64decode("".join(SILENT_MP3_B64)))
+        return True
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace").strip()
+        sys.stderr.write("opencode-tts-dispatch: receiver at %s failed: "
+                         "HTTP %d %s\n" % (target, exc.code, detail[:300]))
+    except Exception as exc:
+        sys.stderr.write("opencode-tts-dispatch: cannot reach receiver at "
+                         "%s (%s)\n" % (target, exc))
+    return False
+
+
+def synth_via_forward(args, target):
+    """Fetch finished audio from the receiver. True if args.out was written."""
+    req = forward_request(target, "/synth", args)
     try:
         # Generous: the far end may be doing GPT-SoVITS on CPU.
         with urllib.request.urlopen(req, timeout=300) as resp:
@@ -228,8 +276,11 @@ def main():
         raise SystemExit("no --text given")
 
     target = forward_target()
-    if target and synth_via_forward(args, target):
-        return
+    if target:
+        forwarder = (speak_via_forward if FORWARD_MODE == "speak"
+                     else synth_via_forward)
+        if forwarder(args, target):
+            return
 
     if has_cjk(args.text) or os.environ.get("VOICEGER_LANG", "English") == "Japanese":
         speak_via_voicevox(args)
