@@ -7,6 +7,11 @@
 Accepts exactly the edge-tts CLI the opencode-tts plugin passes:
     --voice V --rate R --volume P --text T --write-media OUT.mp3
 
+--voice picks the VOICEVOX character for CJK text -- "zundamon" (default),
+"metan", "metan:sexy", "tsumugi", "hau", an edge-tts-shaped name, or a style
+id; `opencode-tts-voicevox --list-voices` prints them. voiceger has a single
+Zundamon fine-tune, so non-CJK text ignores it.
+
 Output is a real audio file at OUT (MP3 when ffplay is present, or always MP3
 via ffmpeg so mpg123 also works).
 
@@ -25,6 +30,7 @@ Environment:
   TTS_FORWARD_PORT  loopback port to probe (default 17999)
   TTS_TOKEN      shared secret, if the receiver requires one
   VOICEVOX_BIN   C shim path   (default ~/.local/bin/opencode-tts-voicevox)
+  VOICEVOX_VOICE override --voice, for callers that hardcode one
   VOICEGER_URL   server base   (default http://127.0.0.1:18123)
   FFMPEG_BIN     (default ffmpeg)
   VOICEGER_LANG  override the voiceger language passed to /tts

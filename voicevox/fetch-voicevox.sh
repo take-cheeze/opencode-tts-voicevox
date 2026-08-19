@@ -19,10 +19,12 @@
 #   - VOICEVOX/voicevox_core       (MIT)
 #   - VOICEVOX/onnxruntime-builder (CPU build CORE dlopen()s)
 #   - r9y9/open_jtalk              (UTF-8 Open JTalk dictionary)
-#   - VOICEVOX/voicevox_vvm        (Zundamon, style id 3)
+#   - VOICEVOX/voicevox_vvm        (0.vvm: ずんだもん / 四国めたん /
+#                                   春日部つむぎ / 雨晴はう)
 #
-# Attribution: audio generated with the voice model must be credited
-# "VOICEVOX:ずんだもん" (see DEST_DIR/models/TERMS.txt written below).
+# Attribution: audio generated with a voice model must be credited to the
+# character that spoke it, e.g. "VOICEVOX:ずんだもん" (see
+# DEST_DIR/models/TERMS.txt written below).
 #
 # Requires: curl, tar, unzip, and sha256sum (Linux) or shasum (macOS).
 set -eu -o pipefail
@@ -152,11 +154,19 @@ cp -R "$work/dict/open_jtalk_dic_utf_8-1.11" "$dest/dict/"
 cp "$cache/0.vvm" "$dest/models/0.vvm"
 
 cat >"$dest/models/TERMS.txt" <<'EOF'
-VOICEVOX:ずんだもん — usage terms (summary)
+0.vvm — usage terms (summary)
 
-Audio generated with this voice model may be used for commercial and
-non-commercial purposes alike, provided it is credited as "VOICEVOX:ずんだもん"
-(e.g. in a game's credits screen or README). Full terms:
+The model holds four characters, addressed by VOICEVOX style id:
+
+  ずんだもん     ノーマル 3, あまあま 1, ツンツン 7, セクシー 5
+  四国めたん     ノーマル 2, あまあま 0, ツンツン 6, セクシー 4
+  春日部つむぎ   ノーマル 8
+  雨晴はう       ノーマル 10
+
+Audio generated with them may be used for commercial and non-commercial
+purposes alike, provided it is credited to whichever character spoke —
+"VOICEVOX:ずんだもん", "VOICEVOX:四国めたん", and so on (e.g. in a game's
+credits screen or README). Full terms:
 https://github.com/VOICEVOX/voicevox_vvm/blob/main/README.md
 EOF
 
