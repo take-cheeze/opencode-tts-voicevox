@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  claude-tts-speakd: speaks text forwarded from Claude Code sessions on other
+  machines. Belongs on the machine with the speakers, not the remote host.
+
+  launchd does no variable expansion; install.sh substitutes @HOME@.
+  Set CLAUDE_TTS_TOKEN here (and on the remote) if the remote host has other
+  users -- they can all reach the forwarded loopback port.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opencode-tts.speakd</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/claude-tts-speakd</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>CLAUDE_TTS_PORT</key><string>17999</string>
+    <key>CLAUDE_TTS_BIND</key><string>127.0.0.1</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/claude-tts-speakd.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/claude-tts-speakd.log</string>
+</dict>
+</plist>

@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Speak text sent by a Claude Code session running on another machine.
+
+Runs on the machine you are actually sitting at -- the one with the models and
+the speakers. A Claude Code session on a remote host POSTs the text here
+through an SSH reverse tunnel, so the remote host needs no VOICEVOX assets, no
+voiceger, and no audio device:
+
+    # ~/.ssh/config, on this machine
+    Host remote
+      RemoteForward 17999 localhost:17999
+
+    remote:  claude-tts-speak  ──POST /speak──►  127.0.0.1:17999
+                                                   │ (ssh -R)
+    here:    claude-tts-speakd ◄───────────────────┘
+                    └─► claude-tts-speak --text ... ─► dispatcher ─► speakers
+
+Endpoints:
+    GET  /ping    -> {"ok": true, ...}
+    POST /speak   {"text": "...", "rate": "+25%"} -> 202 {"ok": true}
+    POST /synth   {"text": "...", "rate": "+25%"} -> 200 audio/mpeg
+
+/speak plays here and is what the Claude Code hook uses. /synth hands the
+audio back instead, for callers that do their own playback -- opencode-tts
+runs the dispatcher for a file and then plays it, and on a host with
+PULSE_SERVER forwarded that playback already lands on these speakers.
+
+Bound to loopback only. On a *shared* remote host every local user can reach
+the forwarded port, so set CLAUDE_TTS_TOKEN at both ends there.
+
+Environment:
+  CLAUDE_TTS_PORT     listen port          (default 17999)
+  CLAUDE_TTS_BIND     listen address       (default 127.0.0.1)
+  CLAUDE_TTS_SPEAK    speak script path    (default ~/.local/bin/claude-tts-speak)
+  CLAUDE_TTS_TOKEN    require this shared secret in X-TTS-Token
+  CLAUDE_TTS_MAXBYTES reject bodies larger than this (default 8192)
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HOME = os.path.expanduser("~")
+PORT = int(os.environ.get("CLAUDE_TTS_PORT", "17999"))
+BIND = os.environ.get("CLAUDE_TTS_BIND", "127.0.0.1")
+SPEAK = os.environ.get("CLAUDE_TTS_SPEAK",
+                       os.path.join(HOME, ".local/bin/claude-tts-speak"))
+DISPATCH = os.environ.get("CLAUDE_TTS_DISPATCH",
+                          os.path.join(HOME, ".local/bin/opencode-tts-dispatch"))
+TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
+MAXBYTES = int(os.environ.get("CLAUDE_TTS_MAXBYTES", "8192"))
+
+
+def usable_path():
+    """PATH for children, rebuilt rather than inherited.
+
+    launchd hands an agent a bare PATH (/usr/bin:/bin:/usr/sbin:/sbin), so the
+    dispatcher we spawn cannot find ffmpeg and synthesis fails with a bare
+    "command not found". Name the prefixes explicitly instead of assuming a
+    login shell ran.
+    """
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    for extra in (os.path.join(HOME, ".nix-profile/bin"), "/opt/homebrew/bin",
+                  "/usr/local/bin", os.path.join(HOME, ".local/bin")):
+        if os.path.isdir(extra) and extra not in parts:
+            parts.insert(0, extra)
+    return os.pathsep.join(parts)
+
+
+def child_env(extra=None):
+    """Environment for anything we spawn.
+
+    Both layers can forward, and both probe the port this daemon serves. Left
+    unset, a child would discover us and hand the work straight back, which is
+    an infinite loop rather than a slow path.
+    """
+    env = dict(os.environ)
+    env["PATH"] = usable_path()
+    env["CLAUDE_TTS_FORWARD"] = "off"     # claude-tts-speak
+    env["TTS_FORWARD"] = "off"            # opencode-tts-dispatch
+    if extra:
+        env.update(extra)
+    return env
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "claude-tts-speakd"
+
+    def log_message(self, fmt, *args):        # quiet unless something failed
+        pass
+
+    def _bytes(self, code, ctype, payload):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") != "/ping":
+            return self._json(404, {"ok": False, "error": "not found"})
+        self._json(200, {"ok": True, "service": "claude-tts-speakd",
+                         "auth": bool(TOKEN)})
+
+    def _read_request(self):
+        """Shared validation. Returns the parsed body, or None after replying."""
+        if TOKEN and self.headers.get("X-TTS-Token") != TOKEN:
+            self._json(403, {"ok": False, "error": "bad token"})
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAXBYTES:
+            self._json(413, {"ok": False, "error": "bad length"})
+            return None
+        try:
+            req = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json(400, {"ok": False, "error": "bad json"})
+            return None
+        if not (req.get("text") or "").strip():
+            self._json(400, {"ok": False, "error": "no text"})
+            return None
+        return req
+
+    def do_POST(self):
+        route = self.path.rstrip("/")
+        if route == "/synth":
+            return self.do_synth()
+        if route != "/speak":
+            return self._json(404, {"ok": False, "error": "not found"})
+        if TOKEN and self.headers.get("X-TTS-Token") != TOKEN:
+            return self._json(403, {"ok": False, "error": "bad token"})
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAXBYTES:
+            return self._json(413, {"ok": False, "error": "bad length"})
+
+        try:
+            req = json.loads(self.rfile.read(length).decode("utf-8"))
+            text = (req.get("text") or "").strip()
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {"ok": False, "error": "bad json"})
+        if not text:
+            return self._json(400, {"ok": False, "error": "no text"})
+
+        env = child_env()
+        if req.get("rate"):
+            env["CLAUDE_TTS_RATE"] = str(req["rate"])
+        try:
+            # Detached: answer immediately so the remote turn is never held
+            # open for the length of the audio.
+            subprocess.Popen([SPEAK, "--text", text], env=env,
+                             stdout=subprocess.DEVNULL,
+                             stderr=None if os.environ.get("CLAUDE_TTS_DEBUG")
+                             else subprocess.DEVNULL)
+        except OSError as exc:
+            return self._json(500, {"ok": False, "error": str(exc)})
+        self._json(202, {"ok": True})
+
+    def do_synth(self):
+        """Synthesize here and hand the audio back; the caller plays it."""
+        req = self._read_request()
+        if req is None:
+            return
+        if not os.path.isfile(DISPATCH):
+            return self._json(500, {"ok": False,
+                                    "error": "no dispatcher at %s" % DISPATCH})
+
+        fd, out = tempfile.mkstemp(suffix=".mp3", prefix="claude-tts-synth-")
+        os.close(fd)
+        try:
+            proc = subprocess.run(
+                [DISPATCH,
+                 "--voice", str(req.get("voice") or "ja-JP-ZundamonNeural"),
+                 "--rate", str(req.get("rate") or "+0%"),
+                 "--volume", str(req.get("volume") or "+0%"),
+                 "--text", req["text"], "--write-media", out],
+                env=child_env(), stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE)
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", "replace").strip()
+                return self._json(502, {"ok": False, "error": detail[:400]})
+            with open(out, "rb") as fh:
+                audio = fh.read()
+            if not audio:
+                return self._json(502, {"ok": False, "error": "empty audio"})
+            self._bytes(200, "audio/mpeg", audio)
+        except OSError as exc:
+            self._json(500, {"ok": False, "error": str(exc)})
+        finally:
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+
+
+def main():
+    if not os.path.isfile(SPEAK):
+        sys.stderr.write("claude-tts-speakd: no speak script at %s\n" % SPEAK)
+        return 1
+    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    srv.daemon_threads = True
+    sys.stderr.write("claude-tts-speakd: listening on %s:%d%s\n"
+                     % (BIND, PORT, " (token required)" if TOKEN else ""))
+    sys.stderr.flush()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

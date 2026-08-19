@@ -65,6 +65,15 @@ make -C "$REPO/voicevox" VOICEVOX_DIR="$VOICEDIR" PREFIX="$PREFIX" install
 echo "==> installing opencode-tts-dispatch into $BIN"
 install -m 0755 "$REPO/opencode-tts-dispatch" "$BIN/opencode-tts-dispatch"
 
+# Claude Code speaks through the same dispatcher, via a Stop hook. Installing
+# the script is enough; registering the hook is a separate, opt-in step
+# (see claude-code/README.md).
+echo "==> installing claude-tts-speak into $BIN"
+install -m 0755 "$REPO/claude-code/claude-tts-speak" "$BIN/claude-tts-speak"
+# Receiver for sessions running over SSH on another machine. Installed
+# everywhere, but only useful on the box with the speakers.
+install -m 0755 "$REPO/claude-code/claude-tts-speakd" "$BIN/claude-tts-speakd"
+
 # --- 3. voiceger server (optional) ------------------------------------------
 install_service_linux() {
   local unit_dir="$HOME/.config/systemd/user"
