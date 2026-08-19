@@ -1,8 +1,8 @@
 # opencode-tts-voicevox — Zundamon TTS for [opencode](https://opencode.ai)
 
 A fully **local** [opencode-tts](https://www.npmjs.com/package/opencode-tts)
-backend that makes **Zundamon** speak your assistant's summaries — no
-Microsoft endpoint, no cloud TTS.
+backend that makes **Zundamon** — or 四国めたん, 春日部つむぎ, 雨晴はう — speak
+your assistant's summaries; no Microsoft endpoint, no cloud TTS.
 
 It dispatches by language:
 
@@ -78,7 +78,7 @@ on Linux, a launchd user agent on macOS:
 
 ### Voicevox shim (Japanese/CJK)
 - `voicevox/opencode-tts-voicevox.c` dlopen()s `libvoicevox_core.{so,dylib}` +
-  a Zundamon `.vvm` + Open JTalk dict and synthesizes a WAV.
+  a `.vvm` + Open JTalk dict and synthesizes a WAV.
 - `voicevox/fetch-voicevox.sh` downloads a pinned, checksummed asset set
   (~90 MiB) for the host platform — `linux-x64`, `osx-arm64`, or `osx-x64`.
 
@@ -92,6 +92,38 @@ on Linux, a launchd user agent on macOS:
 - `voiceger/opencode-tts-voiceger.service` (Linux) and
   `voiceger/com.opencode-tts.voiceger.plist` (macOS) keep the server running;
   `install.sh` bakes your checkout path into whichever one applies.
+
+## Voices
+
+The downloaded `0.vvm` carries four characters, and `--voice` picks among
+them — by name, with an optional style, or by bare VOICEVOX style id:
+
+```sh
+opencode-tts-voicevox --list-voices
+```
+
+| `--voice` | Speaks as | Styles |
+|---|---|---|
+| `zundamon` *(default)* | ずんだもん | `:normal` 3, `:amaama` 1, `:tsuntsun` 7, `:sexy` 5 |
+| `metan` | 四国めたん | `:normal` 2, `:amaama` 0, `:tsuntsun` 6, `:sexy` 4 |
+| `tsumugi` | 春日部つむぎ | `:normal` 8 |
+| `hau` | 雨晴はう | `:normal` 10 |
+
+The name is matched loosely, so the edge-tts spellings already in configs keep
+working (`ja-JP-ZundamonNeural` → ずんだもん, `ja-JP-MetanNeural` → 四国めたん),
+as do the Japanese names and a bare id (`--voice 4`). Anything unrecognized —
+an English voice like `en-US-AvaNeural` — falls back to ずんだもん.
+
+Where to set it:
+
+| | |
+|---|---|
+| opencode | `"voice"` in `~/.config/opencode/plugins/opencode-tts.jsonc` (re-running `install.sh` keeps it) |
+| Claude Code hook | `CLAUDE_TTS_VOICE=metan:sexy` |
+| anywhere, overriding a hardcoded `--voice` | `VOICEVOX_VOICE=tsumugi` |
+
+Only the Japanese/CJK half has a choice: voiceger speaks English with a single
+Zundamon fine-tune, whatever `--voice` says.
 
 ## Notes & caveats
 
@@ -118,5 +150,7 @@ on Linux, a launchd user agent on macOS:
 - **Remote hosts**: `TTS_FORWARD` makes the dispatcher fetch finished audio
   from a `claude-tts-speakd` instead of synthesizing, so a machine you SSH into
   needs no models and no ffmpeg. See `claude-code/README.md`.
-- **License**: audio generated with the Zundamon voice must be credited
-  **VOICEVOX:ずんだもん** per [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html).
+- **License**: audio must be credited to the character that spoke it —
+  **VOICEVOX:ずんだもん**, **VOICEVOX:四国めたん**, and so on. See
+  [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html) and each character's own
+  terms; `voicevox/assets/models/TERMS.txt` has the summary.

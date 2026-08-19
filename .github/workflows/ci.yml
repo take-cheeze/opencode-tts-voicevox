@@ -63,6 +63,17 @@ jobs:
           [ "$(wc -c < "$RUNNER_TEMP/smoke.mp3")" -gt 1000 ] || { echo "mp3 too small" >&2; exit 1; }
           echo "voicevox shim OK"
 
+      - name: Other voices (--list-voices + metan)
+        working-directory: voicevox
+        run: |
+          ./opencode-tts-voicevox --list-voices | grep -q "metan" || {
+            echo "--list-voices missing metan" >&2; exit 1; }
+          ./opencode-tts-voicevox --voice metan:sexy --rate +0% --volume +0% \
+            --text "めたんなのだ。" --write-media "$RUNNER_TEMP/metan.wav"
+          [ "$(wc -c < "$RUNNER_TEMP/metan.wav")" -gt 4000 ] || {
+            echo "metan output too small to be audio" >&2; exit 1; }
+          echo "other voices OK"
+
       - name: Dispatcher e2e (CJK -> voicevox -> mp3)
         run: |
           VOICEVOX_BIN="$PWD/voicevox/opencode-tts-voicevox" \

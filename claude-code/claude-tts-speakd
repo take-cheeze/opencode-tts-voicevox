@@ -17,8 +17,8 @@ voiceger, and no audio device:
 
 Endpoints:
     GET  /ping    -> {"ok": true, ...}
-    POST /speak   {"text": "...", "rate": "+25%"} -> 202 {"ok": true}
-    POST /synth   {"text": "...", "rate": "+25%"} -> 200 audio/mpeg
+    POST /speak   {"text": "...", "rate": "+25%", "voice": "..."} -> 202 {"ok": true}
+    POST /synth   {"text": "...", "rate": "+25%", "voice": "..."} -> 200 audio/mpeg
 
 /speak plays here and is what the Claude Code hook uses. /synth hands the
 audio back instead, for callers that do their own playback -- opencode-tts
@@ -161,6 +161,10 @@ class Handler(BaseHTTPRequestHandler):
         env = child_env()
         if req.get("rate"):
             env["CLAUDE_TTS_RATE"] = str(req["rate"])
+        # The far end picked the voice; speaking it in a different one here
+        # would be a surprise.
+        if req.get("voice"):
+            env["CLAUDE_TTS_VOICE"] = str(req["voice"])
         try:
             # Detached: answer immediately so the remote turn is never held
             # open for the length of the audio.

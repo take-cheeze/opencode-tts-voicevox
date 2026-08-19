@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
 // opencode-tts-voicevox: an edge-tts CLI lookalike backed by
-// VOICEVOX CORE + a local Zundamon voice model, so the opencode-tts
-// plugin can run fully offline (no Microsoft endpoint).
+// VOICEVOX CORE + a local voice model, so the opencode-tts plugin can run
+// fully offline (no Microsoft endpoint).
 //
 // Accepts the same flags opencode-tts (dist/index.js runTts) passes:
 //   --voice <v> --rate <r> --volume <p> --text <t> --write-media <path>
-// --voice is accepted and ignored (the only model loaded is Zundamon's).
+// --voice picks one of the characters in models/0.vvm -- Zundamon (the
+// default), Shikoku Metan, Kasukabe Tsumugi, Amehare Hau -- by name, with an
+// optional style: "metan", "metan:sexy", "ja-JP-MetanNeural", or a bare
+// VOICEVOX style id. $VOICEVOX_VOICE overrides it, for callers that hardcode
+// --voice. `--list-voices` prints the table.
 // --rate "+25%" -> VOICEVOX speedScale 1.25; --volume "+0%" -> volumeScale 1.0.
 //
 // Assets are found in $VOICEVOX_DIR, falling back to a compile-time default
@@ -54,6 +58,117 @@ static int file_exists_dir(const char* dir) {
   return 1;
 }
 
+// Every style packed into models/0.vvm, each with the names --voice accepts
+// for it. The first style listed for a character is that character's
+// default -- ノーマル in every case.
+typedef struct {
+  const char* label;
+  const char* aliases[4];  // NULL-terminated
+  uint32_t id;
+} Style;
+
+typedef struct {
+  const char* label;
+  const char* aliases[4];  // NULL-terminated
+  Style styles[5];         // a NULL label terminates
+} Character;
+
+static const Character CHARACTERS[] = {
+    {"ずんだもん", {"zundamon", "zunda", "ずんだもん", NULL},
+     {{"ノーマル", {"normal", "ノーマル", NULL}, 3},
+      {"あまあま", {"amaama", "sweet", "あまあま", NULL}, 1},
+      {"ツンツン", {"tsuntsun", "tsun", "ツンツン", NULL}, 7},
+      {"セクシー", {"sexy", "セクシー", NULL}, 5},
+      {NULL, {NULL}, 0}}},
+    {"四国めたん", {"shikokumetan", "metan", "めたん", NULL},
+     {{"ノーマル", {"normal", "ノーマル", NULL}, 2},
+      {"あまあま", {"amaama", "sweet", "あまあま", NULL}, 0},
+      {"ツンツン", {"tsuntsun", "tsun", "ツンツン", NULL}, 6},
+      {"セクシー", {"sexy", "セクシー", NULL}, 4},
+      {NULL, {NULL}, 0}}},
+    {"春日部つむぎ", {"kasukabetsumugi", "tsumugi", "つむぎ", NULL},
+     {{"ノーマル", {"normal", "ノーマル", NULL}, 8},
+      {NULL, {NULL}, 0}}},
+    {"雨晴はう", {"ameharehau", "hau", "はう", NULL},
+     {{"ノーマル", {"normal", "ノーマル", NULL}, 10},
+      {NULL, {NULL}, 0}}},
+};
+
+#define N_CHARACTERS (sizeof(CHARACTERS) / sizeof(CHARACTERS[0]))
+
+static const VoicevoxStyleId DEFAULT_STYLE = 3;  // ずんだもん ノーマル
+
+// Lowercase the ASCII, drop ASCII punctuation, keep every other byte (so a
+// name written in Japanese survives intact). It is what makes the edge-tts
+// spellings in existing configs work: "ja-JP-ZundamonNeural" normalizes to
+// something the alias "zundamon" is a plain substring of.
+static void normalize(const char* in, char* out, size_t n) {
+  size_t o = 0;
+  for (; *in && o + 1 < n; in++) {
+    unsigned char c = (unsigned char)*in;
+    if (c >= 0x80)
+      out[o++] = (char)c;
+    else if (isalnum(c))
+      out[o++] = (char)tolower(c);
+  }
+  out[o] = '\0';
+}
+
+static int alias_match(const char* norm, const char* const* aliases) {
+  for (; *aliases; aliases++)
+    if (strstr(norm, *aliases))
+      return 1;
+  return 0;
+}
+
+// 1 if `voice` names something synthesizable, with *style set to it.
+static int resolve_voice(const char* voice, VoicevoxStyleId* style) {
+  if (!voice || !*voice)
+    return 0;
+  char norm[256];
+  normalize(voice, norm, sizeof(norm));
+  if (!*norm)
+    return 0;
+
+  // A bare number addresses styles this table does not know about, which is
+  // the escape hatch if a future .vvm ships more of them.
+  char* end;
+  long id = strtol(norm, &end, 10);
+  if (!*end && id >= 0) {
+    *style = (VoicevoxStyleId)id;
+    return 1;
+  }
+
+  for (size_t i = 0; i < N_CHARACTERS; i++) {
+    const Character* c = &CHARACTERS[i];
+    if (!alias_match(norm, c->aliases))
+      continue;
+    *style = c->styles[0].id;
+    for (const Style* st = c->styles; st->label; st++) {
+      if (alias_match(norm, st->aliases)) {
+        *style = st->id;
+        break;
+      }
+    }
+    return 1;
+  }
+  return 0;
+}
+
+static void list_voices(void) {
+  printf("--voice takes a character name, optionally a style after it\n"
+         "(\"metan\", \"metan:sexy\", \"ja-JP-MetanNeural\"), or a style id.\n"
+         "$VOICEVOX_VOICE overrides --voice.\n\n");
+  for (size_t i = 0; i < N_CHARACTERS; i++) {
+    const Character* c = &CHARACTERS[i];
+    printf("%s / %s\n", c->label, c->aliases[0]);
+    for (const Style* st = c->styles; st->label; st++)
+      printf("  %2u  %s  %s:%s%s\n", (unsigned)st->id, st->label,
+             c->aliases[0], st->aliases[0],
+             st->id == DEFAULT_STYLE ? "   (default)" : "");
+  }
+}
+
 static int set_json_number(char** jsp, const char* field, double v) {
   char* json = *jsp;
   char key[80];
@@ -76,6 +191,7 @@ static int set_json_number(char** jsp, const char* field, double v) {
 int main(int argc, char** argv) {
   const char* text = NULL;
   const char* out_path = NULL;
+  const char* voice = NULL;
   double rate_pct = 0.0;
   double volume_pct = 0.0;
 
@@ -96,8 +212,24 @@ int main(int argc, char** argv) {
       if (next[0] == '+' || next[0] == '-' || isdigit((unsigned char)next[0]))
         volume_pct = atof(next);
       i++;
+    } else if (!strcmp(a, "--voice") && next) {
+      voice = next;
+      i++;
+    } else if (!strcmp(a, "--list-voices")) {
+      list_voices();
+      return 0;
     }
-    // --voice: accepted and ignored (single loaded model).
+  }
+
+  // The environment wins: callers that hardcode --voice (claude-tts-speak, an
+  // opencode-tts config you would rather not edit) still leave this open.
+  VoicevoxStyleId style = DEFAULT_STYLE;
+  if (!resolve_voice(getenv("VOICEVOX_VOICE"), &style) &&
+      voice && *voice && !resolve_voice(voice, &style)) {
+    // An edge-tts voice name for some other engine ("en-US-AvaNeural") is not
+    // an error -- the dispatcher hands us whatever the plugin config says.
+    fprintf(stderr, "opencode-tts-voicevox: unknown voice \"%s\", using %s\n",
+            voice, CHARACTERS[0].label);
   }
 
   if (!text || !*text) {
@@ -207,7 +339,6 @@ int main(int argc, char** argv) {
   CHECK(p_mopen(buf, &mf), "voice model open");
   CHECK(p_mload(s, mf, p_mlopts()), "voice model load");
 
-  VoicevoxStyleId style = 3;  // Zundamon normal
   char* qtmp;
   CHECK(p_query(s, text, style, &qtmp), "audio query");
   char* q = strdup(qtmp);
