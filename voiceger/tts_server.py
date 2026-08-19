@@ -27,15 +27,37 @@ BERT = os.environ.get("VOICEGER_BERT",
     os.path.join(GS, "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"))
 CNHUBERT = os.environ.get("VOICEGER_CNHUBERT",
     os.path.join(GS, "GPT_SoVITS/pretrained_models/chinese-hubert-base"))
-REF = os.environ.get("VOICEGER_REF",
-    os.path.join(VOICEGER_SRC, "reference/reference.wav"))
+def _default_ref():
+    """Pick the voice-cloning reference clip out of the voiceger tree.
+
+    Upstream ships one wav per emotion (01_ref_emoNormal026.wav, ...) rather
+    than a single reference.wav, and ref_text.txt is the transcript of the
+    normal-emotion take -- which sorts first.
+    """
+    ref_dir = os.path.join(VOICEGER_SRC, "reference")
+    named = os.path.join(ref_dir, "reference.wav")
+    if os.path.isfile(named):
+        return named
+    wavs = sorted(f for f in os.listdir(ref_dir) if f.endswith(".wav")) \
+        if os.path.isdir(ref_dir) else []
+    return os.path.join(ref_dir, wavs[0]) if wavs else named
+
+
+REF = os.environ.get("VOICEGER_REF") or _default_ref()
 REF_TEXT = os.environ.get("VOICEGER_REF_TEXT",
     os.path.join(VOICEGER_SRC, "reference/ref_text.txt"))
 
-for label, path in [("GPT-SoVITS dir", GS), ("GPT weights", GPT),
-                    ("SoVITS weights", SOVITS), ("BERT", BERT),
-                    ("CNHuBERT", CNHUBERT), ("reference wav", REF)]:
-    if not os.path.exists(os.path.dirname(path) or path):
+# Check the artefacts themselves, not just their parent directory -- a missing
+# weight file used to surface much later as an opaque failure mid-inference.
+for label, path, kind in [("GPT-SoVITS dir", GS, "dir"),
+                          ("GPT weights", GPT, "file"),
+                          ("SoVITS weights", SOVITS, "file"),
+                          ("BERT", BERT, "dir"),
+                          ("CNHuBERT", CNHUBERT, "dir"),
+                          ("reference wav", REF, "file"),
+                          ("reference text", REF_TEXT, "file")]:
+    ok = os.path.isdir(path) if kind == "dir" else os.path.isfile(path)
+    if not ok:
         raise SystemExit(f"voiceger: missing {label}: {path}\n"
                          f"  (set VOICEGER_SRC correctly / run setup-voiceger.sh)")
 
@@ -120,6 +142,6 @@ def tts_endpoint(req: TtsRequest):
 
 if __name__ == "__main__":
     port = int(os.environ.get("VOICEGER_PORT", sys.argv[sys.argv.index("--port") + 1]
-                              if "--port" in sys.argv else "8123"))
+                              if "--port" in sys.argv else "18123"))
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

@@ -8,7 +8,7 @@ Type=simple
 # resolves everything else from env + its own location; override with
 # VOICEGER_*_DIR / VOICEGER_PORT / VOICEGER_DEVICE if your layout differs.
 ExecStart=%h/dev/opencode-tts-voicevox/voiceger/run-voiceger-server.sh
-Environment=VOICEGER_PORT=8123
+Environment=VOICEGER_PORT=18123
 Environment=VOICEGER_DEVICE=cpu
 Restart=on-failure
 RestartSec=5

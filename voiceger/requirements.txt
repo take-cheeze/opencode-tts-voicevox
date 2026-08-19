@@ -32,6 +32,14 @@
 #
 # Everything below — run AFTER torch:
 
+# torch itself is installed first, from a platform-specific index (cu121 on
+# Linux, stock wheels on macOS) -- see setup-voiceger.sh.  It is pinned here
+# too so that resolving this file cannot silently drag in a newer torch:
+# `==2.1.2` still matches the `2.1.2+cu121` local version on Linux.
+torch==2.1.2
+torchaudio==2.1.2
+torchvision==0.16.2
+
 numpy==1.26.4           # torch 2.1.2 is compiled against numpy 1.x
 librosa==0.9.2          # 0.10.x removed librosa.util.normalize/pad_center/tiny
 soundfile==0.14.0
@@ -42,7 +50,8 @@ fastapi==0.141.1
 uvicorn==0.52.3
 pydantic>=2
 torchmetrics==1.9.0
-lightning-utilities==0.14.3
+lightning-utilities==0.15.3   # torchmetrics 1.9.0 needs >=0.15.3
+pytorch-lightning==2.6.5      # GPT-SoVITS AR model is a LightningModule
 
 nltk==3.10.3
 wordsegment==1.3.1
@@ -53,7 +62,7 @@ jamo==0.4.1
 g2pk2==0.0.3
 pypinyin==0.55.0
 cn2an==0.5.24
-py3langid==0.3.0
+py3langid==0.2.2        # 0.3.0 requires numpy>=2, torch 2.1.2 needs numpy 1.x
 
 einops==0.8.2
 matplotlib==3.10.9
