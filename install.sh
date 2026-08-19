@@ -120,6 +120,15 @@ fi
 CFG_DIR="$HOME/.config/opencode/plugins"
 CFG="$CFG_DIR/opencode-tts.jsonc"
 mkdir -p "$CFG_DIR"
+# Re-running the installer should not silently undo a voice you picked
+# (`opencode-tts-voicevox --list-voices` shows the choices).
+VOICE="ja-JP-ZundamonNeural"
+if [[ -f "$CFG" ]]; then
+  prev="$(sed -n 's/.*"voice"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -1)"
+  # not `&&` -- this is the last line of the block, and under `set -e` an
+  # empty $prev would end the install right here.
+  if [[ -n "$prev" ]]; then VOICE="$prev"; fi
+fi
 cat > "$CFG" <<JSON
 {
   "enabled": true,
@@ -127,13 +136,14 @@ cat > "$CFG" <<JSON
   "backend": "edge_tts",
   "edge_tts": {
     "command": ["$BIN/opencode-tts-dispatch"],
-    "voice": "ja-JP-ZundamonNeural",
+    "voice": "$VOICE",
     "rate": "+25%",
     "volume": "+0%"
   }
 }
 JSON
-echo "==> wrote $CFG"
+echo "==> wrote $CFG (voice: $VOICE)"
+echo "    other voices: $BIN/opencode-tts-voicevox --list-voices"
 
 # register the plugin in opencode.json (project or global)
 for f in ./opencode.json "$HOME/.config/opencode/opencode.json"; do

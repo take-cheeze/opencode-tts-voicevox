@@ -20,6 +20,8 @@ Environment:
   CLAUDE_TTS_SENTENCES  how many sentences to speak (default 2)
   CLAUDE_TTS_MAXCHARS   hard cap before truncating   (default 350)
   CLAUDE_TTS_RATE       speech rate passed through   (default +25%)
+  CLAUDE_TTS_VOICE      which voice speaks (default ja-JP-ZundamonNeural);
+                        `opencode-tts-voicevox --list-voices` prints the set
   CLAUDE_TTS_PLAYER     override the audio player command
   CLAUDE_TTS_FORWARD    receiver URL, or "off" to always speak locally;
                         unset auto-detects one on CLAUDE_TTS_FORWARD_PORT
@@ -43,6 +45,7 @@ DISPATCH = os.environ.get("CLAUDE_TTS_DISPATCH",
 SENTENCES = int(os.environ.get("CLAUDE_TTS_SENTENCES", "2"))
 MAXCHARS = int(os.environ.get("CLAUDE_TTS_MAXCHARS", "350"))
 RATE = os.environ.get("CLAUDE_TTS_RATE", "+25%")
+VOICE = os.environ.get("CLAUDE_TTS_VOICE", "ja-JP-ZundamonNeural")
 STATE = os.path.join(tempfile.gettempdir(), "claude-tts-speak.pid")
 FORWARD = os.environ.get("CLAUDE_TTS_FORWARD", "")
 FORWARD_PORT = os.environ.get("CLAUDE_TTS_FORWARD_PORT", "17999")
@@ -184,7 +187,7 @@ def forward_target():
 
 def forward(text, target):
     """Hand the text to the receiver. True if it accepted responsibility."""
-    body = json.dumps({"text": text, "rate": RATE}).encode("utf-8")
+    body = json.dumps({"text": text, "rate": RATE, "voice": VOICE}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if TOKEN:
         headers["X-TTS-Token"] = TOKEN
@@ -209,7 +212,7 @@ def speak_local(text):
     fd, out = tempfile.mkstemp(suffix=".mp3", prefix="claude-tts-")
     os.close(fd)
     try:
-        subprocess.run([DISPATCH, "--voice", "ja-JP-ZundamonNeural",
+        subprocess.run([DISPATCH, "--voice", VOICE,
                         "--rate", RATE, "--volume", "+0%",
                         "--text", text, "--write-media", out],
                        check=True, stdout=subprocess.DEVNULL,
