@@ -40,8 +40,8 @@ import argparse
 import base64
 import json
 import os
+import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -64,9 +64,6 @@ SERVICE_HINT = (
     if sys.platform == "darwin" else
     "  check: systemctl --user status opencode-tts-voiceger\n"
     "  log:   journalctl --user -u opencode-tts-voiceger -e")
-# tempfile honours $TMPDIR, which on macOS is a per-user directory rather
-# than a shared /tmp.
-ERR = os.path.join(tempfile.gettempdir(), "opencode-tts-dispatch.%d.err" % os.getpid())
 
 
 def die(msg):
@@ -81,19 +78,14 @@ def unlink(path):
         pass
 
 
-def sh(cmd):
-    rc = os.system(cmd + " >/dev/null 2>%s" % ERR)
-    try:
-        if rc != 0:
-            with open(ERR, encoding="utf-8", errors="replace") as fh:
-                sys.stderr.write(fh.read())
-            raise SystemExit(1)
-    finally:
-        unlink(ERR)
-
-
-def quote(s):
-    return "'" + s.replace("'", "'\\''") + "'"
+def sh(argv, env=None):
+    """Run argv directly -- no shell, so this is one process launch, not the
+    shell-plus-child pair os.system()/`sh -c` costs on every call."""
+    proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE, env=env)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr.decode("utf-8", "replace"))
+        raise SystemExit(1)
 
 
 def has_cjk(text):
@@ -109,32 +101,30 @@ def has_cjk(text):
 
 
 def mp3(in_path, out_path):
-    sh(FFMPEG + " -y -i " + quote(in_path) + " -vn -f mp3 -codec:a libmp3lame"
-       + " -q:a 2 " + quote(out_path))
+    sh([FFMPEG, "-y", "-i", in_path, "-vn", "-f", "mp3", "-codec:a",
+        "libmp3lame", "-q:a", "2", out_path])
 
 
 def speak_via_voicevox(args):
-    cmd = (VOICEVOX + " "
-           + "--voice " + quote(args.voice)
-           + " --rate " + quote(args.rate)
-           + " --volume " + quote(args.volume)
-           + " --text " + quote(args.text)
-           + " --write-media " + quote(args.out))
+    cmd = [VOICEVOX, "--voice", args.voice, "--rate", args.rate,
+           "--volume", args.volume, "--text", args.text,
+           "--write-media", args.out]
     # A shim built inside a Nix shell carries a DT_RUNPATH into the Nix store,
     # but the loader does not apply it transitively to the dlopen()ed
     # libvoicevox_core.so ("libstdc++.so.6: cannot open shared object file").
-    # Give the shim a findable libstdc++ via a scoped env prefix so it does not
-    # leak into ffmpeg/ffplay and friends.
+    # Give the shim a findable libstdc++ via a scoped env so it does not leak
+    # into ffmpeg/ffplay and friends.
+    env = None
     for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64",
               "/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu"):
         if not os.path.exists(os.path.join(d, "libstdc++.so.6")):
             continue
         base = os.environ.get("LD_LIBRARY_PATH", "")
         if d not in base.split(":"):
-            cmd = "env LD_LIBRARY_PATH=%s%s %s" % (
-                quote(d), (":" + quote(base) if base else ""), cmd)
+            env = dict(os.environ)
+            env["LD_LIBRARY_PATH"] = d + (":" + base if base else "")
         break
-    sh(cmd)
+    sh(cmd, env=env)
     tmp = args.out + ".wav"
     os.replace(args.out, tmp)
     mp3(tmp, args.out)
