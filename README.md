@@ -141,6 +141,7 @@ whether a component is cold (first call after startup) or warm.
 | `opencode-tts-voicevox` (per-invocation CLI) | short (6 chars) | 420 MB | none (CPU) | 0.9 s |
 | | medium (40 chars) | 550 MB | none (CPU) | 1.9 s |
 | | long (~80 chars) | 840 MB | none (CPU) | 2.9 s |
+| audio player (`afplay`, per-invocation) | ~75 CJK chars | 20 MB | none | duration of the clip |
 | `voiceger` (`tts_server.py`, persistent) | idle | 43 MB | none (CPU¹) | — |
 | | warm request, short sentence | 1.4 GB | none (CPU¹) | 2.1 s |
 | | warm request, longer sentence | 1.6 GB | none (CPU¹) | 4.2 s |
@@ -158,6 +159,17 @@ ONNX Runtime init, Open JTalk dictionary, model load) — roughly 400 MB and
 0.7-0.9 s before any text-dependent cost, since it is a one-shot process
 rather than a resident server. voiceger and Ollama pay a similar one-time
 cost only on the *first* request after their model loads.
+
+**With `--skip-voiceger`/`--translate-always`** (see [Install](#install)),
+`voiceger` and the Ollama rows above never run — VOICEVOX (CJK-only, since
+translation guarantees Japanese text before it reaches the dispatcher) plus
+the audio player are the whole footprint, well under 1 GB peak, and the two
+barely overlap: the dispatcher writes finished audio to a temp file and
+exits before playback starts, so it's sequential, not additive. Swapping the
+summarizer/translator from the Ollama endpoint to `CLAUDE_TTS_SUMMARY_OPENCODE=1`
+(see `claude-code/README.md`) adds no local RSS of its own either — `opencode
+run` is a remote API call, so its cost shows up as latency and API quota, not
+memory on this box.
 
 ## Notes & caveats
 
