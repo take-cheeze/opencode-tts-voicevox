@@ -28,6 +28,13 @@
  * Env:
  *   OPENCODE_TTS_DISABLED=1     turn it off
  *   OPENCODE_TTS_NO_SUMMARY=1   speak the reply verbatim instead of summarizing
+ *   OPENCODE_TTS_TRANSLATE_REPLIES=1  translate the reply to Japanese first,
+ *                               so it goes out through the VOICEVOX voice
+ *                               instead of voiceger's single English one --
+ *                               off by default: whether you want your own
+ *                               language back is not this plugin's call to
+ *                               make for you the way it is for your own
+ *                               already-Japanese-if-you-want-it prompt
  *   OPENCODE_TTS_ASK_PHRASE     what to say on a permission prompt
  *   OPENCODE_TTS_MAXCHARS       cap on text handed over (default 60000)
  *   OPENCODE_TTS_USER_VOICE     voice for your own prompts (chat.message);
@@ -37,6 +44,7 @@
 const SPEAK = `${process.env.HOME}/.local/bin/claude-tts-speak`
 const ASK_PHRASE = process.env.OPENCODE_TTS_ASK_PHRASE ?? "コマンドの確認をお願いするのだ。"
 const SUMMARIZE = process.env.OPENCODE_TTS_NO_SUMMARY !== "1"
+const TRANSLATE_REPLIES = process.env.OPENCODE_TTS_TRANSLATE_REPLIES === "1"
 const MAXCHARS = Number(process.env.OPENCODE_TTS_MAXCHARS ?? 60000)
 const USER_VOICE = process.env.OPENCODE_TTS_USER_VOICE ?? ""
 const PROMPT_MAXCHARS = Number(process.env.OPENCODE_TTS_PROMPT_MAXCHARS ?? 200)
@@ -113,7 +121,11 @@ export const ZundamonTts = async () => {
       }
 
       const payload = text.length > MAXCHARS ? text.slice(0, MAXCHARS) : text
-      speak(SUMMARIZE ? ["--summarize", "--text", payload] : ["--text", payload])
+      const args = []
+      if (TRANSLATE_REPLIES) args.push("--translate")
+      if (SUMMARIZE) args.push("--summarize")
+      args.push("--text", payload)
+      speak(args)
     },
   }
 }

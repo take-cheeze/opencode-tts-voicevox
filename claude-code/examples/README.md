@@ -86,6 +86,20 @@ self-hosted endpoint the summarizer uses (`CLAUDE_TTS_SUMMARY_URL` /
 `CLAUDE_TTS_SUMMARY_MODEL`, set on whichever machine actually synthesizes --
 see Summarizer below). Unset, `chat.message` is a no-op.
 
+`OPENCODE_TTS_TRANSLATE_REPLIES=1` does the same for the assistant's own
+reply on `session.idle` -- off by default, since unlike your own prompt
+(which you chose to have translated) the reply's language is opencode's
+call to make, not this plugin's. On, it goes out through the VOICEVOX voice
+instead of voiceger's single English one, same as `--translate` on the
+Claude Code Stop hook.
+
+A model small enough to be cheap can still be an unreliable translator: a
+1.5B model was observed answering in English instead of Japanese on a real
+reply -- success-shaped (non-empty), just not a translation. claude-tts-speak
+now checks the output actually contains Japanese before accepting it, so
+that fails to silence rather than to the wrong voice, but getting an actual
+translation took bumping to a bigger model (3B was reliable here).
+
 ## The tunnel
 
 `~/.ssh/config`, on the machine with the speakers:
