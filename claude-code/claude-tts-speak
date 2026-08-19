@@ -479,6 +479,16 @@ def opencode_run(prompt, text):
         debug("no opencode pricing available; trying opencode's own default")
         candidates = [None]
 
+    # `opencode run` is a full opencode session and, unless told otherwise,
+    # loads the same ZundamonTts plugin -- so its own reply would trigger
+    # session.idle, which would summarize/translate *that* via another
+    # `opencode run`, forever. OPENCODE_TTS_DISABLED silences the plugin in
+    # the child; CLAUDE_TTS_INHIBIT is the equivalent belt-and-suspenders for
+    # any claude-tts-speak hook the child session might also have wired up.
+    env = dict(os.environ)
+    env["OPENCODE_TTS_DISABLED"] = "1"
+    env["CLAUDE_TTS_INHIBIT"] = "1"
+
     for model in candidates:
         argv = [OPENCODE_BIN, "run", "--format", "json"]
         if model:
@@ -486,7 +496,7 @@ def opencode_run(prompt, text):
         argv.append(prompt + "\n\n" + text)
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=SUMMARY_TIMEOUT)
+                                  timeout=SUMMARY_TIMEOUT, env=env)
         except (subprocess.TimeoutExpired, OSError) as exc:
             debug("opencode CLI failed (%s)" % exc)
             return None
