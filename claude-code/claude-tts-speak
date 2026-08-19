@@ -55,6 +55,8 @@ STATE = os.path.join(tempfile.gettempdir(), "claude-tts-speak.pid")
 FORWARD = os.environ.get("CLAUDE_TTS_FORWARD", "")
 FORWARD_PORT = os.environ.get("CLAUDE_TTS_FORWARD_PORT", "17999")
 TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
+NOTIFY_FALLBACK = os.environ.get("CLAUDE_TTS_NOTIFY_FALLBACK", "確認をお願いするのだ。")
+NOTIFY_MAXCHARS = int(os.environ.get("CLAUDE_TTS_NOTIFY_MAXCHARS", "90"))
 SUMMARY_TIMEOUT = float(os.environ.get("CLAUDE_TTS_SUMMARY_TIMEOUT", "90"))
 SUMMARY_URL = os.environ.get("CLAUDE_TTS_SUMMARY_URL", "").rstrip("/")
 SUMMARY_MODEL = os.environ.get("CLAUDE_TTS_SUMMARY_MODEL", "")
@@ -326,6 +328,43 @@ def speak_local(text):
             pass
 
 
+def text_from_notification():
+    """Turn a Notification hook payload into something worth hearing.
+
+    Claude Code sends this when it is waiting on you -- a question, or a
+    permission prompt. The payload wording is the informative part, so speak it
+    rather than a fixed phrase, but keep it short: this is an alert, and a long
+    English sentence takes ten seconds to synthesize.
+    """
+    try:
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = {}
+    if os.environ.get("CLAUDE_TTS_DEBUG") == "1":
+        # The exact shape is not documented; keep a copy to refine against.
+        try:
+            with open(os.path.join(tempfile.gettempdir(),
+                                   "claude-tts-notify.json"), "w") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    msg = ""
+    for key in ("message", "title", "body", "notification", "reason"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            msg = val.strip()
+            break
+    if not msg:
+        tool = payload.get("tool_name") or ""
+        msg = ("%s の確認をお願いするのだ。" % tool) if tool else NOTIFY_FALLBACK
+
+    msg = re.sub(r"\s+", " ", msg).strip()
+    if len(msg) > NOTIFY_MAXCHARS:
+        msg = msg[:NOTIFY_MAXCHARS].rsplit(" ", 1)[0]
+    return msg
+
+
 def text_from_hook():
     try:
         payload = json.load(sys.stdin)
@@ -355,11 +394,14 @@ def main():
         want_summary = True
         argv = [a for a in argv if a != "--summarize"]
 
-    if len(argv) > 1 and argv[0] == "--text":
+    if argv and argv[0] == "--notify":
+        text = text_from_notification()
+    elif len(argv) > 1 and argv[0] == "--text":
         text = " ".join(argv[1:]).strip()
     elif argv:
-        sys.stderr.write("usage: claude-tts-speak [--summarize] [--text WORDS]   "
-                         "(hook payload on stdin otherwise)\n")
+        sys.stderr.write("usage: claude-tts-speak [--summarize] "
+                         "[--text WORDS | --notify]   "
+                         "(Stop hook payload on stdin otherwise)\n")
         return
     else:
         text = text_from_hook()
