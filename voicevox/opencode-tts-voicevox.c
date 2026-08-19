@@ -12,11 +12,16 @@
 // Assets are found in $VOICEVOX_DIR, falling back to a compile-time default
 // (pass -DDEFAULT_VOICEVOX_DIR=/path/to/assets/voicevox) or ./assets/voicevox.
 //
-// Build:
+// Build (Linux):
 //   gcc -O2 -std=c11 -DDEFAULT_VOICEVOX_DIR="/path/to/assets/voicevox"
 //       -I <voicevox dir>/core/include -o opencode-tts-voicevox opencode-tts-voicevox.c -ldl
+// Build (macOS): same without -ldl (dlopen lives in libSystem).
 
+// Apple's headers hide non-POSIX declarations under a strict _POSIX_C_SOURCE,
+// so only ask for POSIX.1-2008 where glibc needs it to expose strdup().
+#ifndef __APPLE__
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include <stdint.h>
 
@@ -29,13 +34,19 @@
 
 #include "voicevox_core.h"
 
+// Shared-library suffix of the platform CORE was downloaded for; the Makefile
+// passes the right one, this is just the Linux fallback for a bare compile.
+#ifndef VOICEVOX_LIB_EXT
+#define VOICEVOX_LIB_EXT "so"
+#endif
+
 typedef void (*json_free_fn)(char*);
 typedef void (*wav_free_fn)(uint8_t*);
 typedef const char* (*err_msg_fn)(VoicevoxResultCode);
 
 static int file_exists_dir(const char* dir) {
   char p[4096];
-  snprintf(p, sizeof(p), "%s/core/lib/libvoicevox_core.so", dir);
+  snprintf(p, sizeof(p), "%s/core/lib/libvoicevox_core." VOICEVOX_LIB_EXT, dir);
   FILE* f = fopen(p, "rb");
   if (!f)
     return 0;
@@ -107,11 +118,12 @@ int main(int argc, char** argv) {
   if (!file_exists_dir(dir))
     dir = "assets/voicevox";
 
-  char core_so[4096];
-  snprintf(core_so, sizeof(core_so), "%s/core/lib/libvoicevox_core.so", dir);
-  void* h = dlopen(core_so, RTLD_NOW | RTLD_LOCAL);
+  char core_lib[4096];
+  snprintf(core_lib, sizeof(core_lib),
+           "%s/core/lib/libvoicevox_core." VOICEVOX_LIB_EXT, dir);
+  void* h = dlopen(core_lib, RTLD_NOW | RTLD_LOCAL);
   if (!h) {
-    fprintf(stderr, "opencode-tts-voicevox: dlopen(%s): %s\n", core_so,
+    fprintf(stderr, "opencode-tts-voicevox: dlopen(%s): %s\n", core_lib,
             dlerror());
     return 1;
   }
@@ -174,8 +186,8 @@ int main(int argc, char** argv) {
   } while (0)
 
   char buf[4096];
-  snprintf(buf, sizeof(buf), "%s/onnxruntime/lib/libvoicevox_onnxruntime.so",
-           dir);
+  snprintf(buf, sizeof(buf),
+           "%s/onnxruntime/lib/libvoicevox_onnxruntime." VOICEVOX_LIB_EXT, dir);
   VoicevoxLoadOnnxruntimeOptions ort = p_ort_opts();
   ort.filename = buf;
   const VoicevoxOnnxruntime* ortc;

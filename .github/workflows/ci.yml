@@ -13,13 +13,25 @@ concurrency:
 
 jobs:
   voicevox-shim:
-    name: voicevox shim build + synth (e2e)
-    runs-on: ubuntu-latest
+    name: voicevox shim build + synth (e2e, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-latest is x86_64, macos-latest is Apple silicon — between them
+        # both halves of fetch-voicevox.sh's platform table get exercised.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install
+      - name: Install (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update -y && sudo apt-get install -y build-essential unzip ffmpeg
+
+      - name: Install (macOS)
+        if: runner.os == 'macOS'
+        # clang and unzip ship with the runner image; ffmpeg does not.
+        run: brew install ffmpeg
 
       # VOICEVOX assets are ~90 MiB and checksummed by fetch-voicevox.sh;
       # cache them so the download is one-time.
@@ -28,8 +40,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/voicevox-assets
-          key: voicevox-assets-${{ runner.os }}-${{ hashFiles('voicevox/fetch-voicevox.sh') }}
-          restore-keys: voicevox-assets-${{ runner.os }}-
+          key: voicevox-assets-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('voicevox/fetch-voicevox.sh') }}
+          restore-keys: voicevox-assets-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Fetch VOICEVOX assets (cache miss)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -43,12 +55,23 @@ jobs:
         run: |
           ./opencode-tts-voicevox --voice x --rate +25% --volume +0% \
             --text "CI の smoke test です。" \
-            --write-media /tmp/smoke.wav
-          size=$(wc -c < /tmp/smoke.wav); echo "synth ${size} bytes"
+            --write-media "$RUNNER_TEMP/smoke.wav"
+          size=$(wc -c < "$RUNNER_TEMP/smoke.wav"); echo "synth ${size} bytes"
           [ "$size" -gt 4000 ] || { echo "output too small to be audio" >&2; exit 1; }
-          ffmpeg -y -i /tmp/smoke.wav -vn -f mp3 -codec:a libmp3lame -q:a 2 /tmp/smoke.mp3
-          [ "$(wc -c < /tmp/smoke.mp3)" -gt 1000 ] || { echo "mp3 too small" >&2; exit 1; }
+          ffmpeg -y -i "$RUNNER_TEMP/smoke.wav" -vn -f mp3 -codec:a libmp3lame \
+            -q:a 2 "$RUNNER_TEMP/smoke.mp3"
+          [ "$(wc -c < "$RUNNER_TEMP/smoke.mp3")" -gt 1000 ] || { echo "mp3 too small" >&2; exit 1; }
           echo "voicevox shim OK"
+
+      - name: Dispatcher e2e (CJK -> voicevox -> mp3)
+        run: |
+          VOICEVOX_BIN="$PWD/voicevox/opencode-tts-voicevox" \
+          VOICEVOX_DIR="$HOME/voicevox-assets" \
+            python3 ./opencode-tts-dispatch --voice x --rate +0% --volume +0% \
+              --text "ずんだもんなのだ。" --write-media "$RUNNER_TEMP/dispatch.mp3"
+          [ "$(wc -c < "$RUNNER_TEMP/dispatch.mp3")" -gt 1000 ] || {
+            echo "dispatcher mp3 too small" >&2; exit 1; }
+          echo "dispatcher OK"
 
   dispatcher:
     name: dispatcher (CJK routing) unit
@@ -73,3 +96,15 @@ jobs:
           assert m.has_cjk("mixed 中文") is True
           print("dispatcher: CJK detection OK")
           PY
+
+  shellcheck:
+    name: shell scripts parse (bash + sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: |
+          for f in install.sh voicevox/fetch-voicevox.sh \
+                   voiceger/setup-voiceger.sh voiceger/run-voiceger-server.sh; do
+            bash -n "$f" && echo "ok: $f"
+          done

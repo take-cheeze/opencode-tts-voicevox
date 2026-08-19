@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd counterpart of opencode-tts-voiceger.service (macOS).
+
+  launchd does no variable expansion, so install.sh substitutes @REPO@ and
+  @HOME@ when copying this into ~/Library/LaunchAgents/.  Override the
+  VOICEGER_* values below (VOICEGER_DEVICE=mps to try the Apple GPU) and
+  reload with:
+      launchctl bootout  gui/$(id -u)/com.opencode-tts.voiceger
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-tts.voiceger.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opencode-tts.voiceger</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@REPO@/voiceger/run-voiceger-server.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>VOICEGER_PORT</key><string>8123</string>
+    <key>VOICEGER_DEVICE</key><string>cpu</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+
+  <!-- Restart=on-failure: respawn on a crash, stay down on a clean exit. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+
+  <!-- Cold model load is slow (~1-2 min on CPU); launchd does not time it out,
+       but the log is the only place startup progress shows up. -->
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/opencode-tts-voiceger.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/opencode-tts-voiceger.log</string>
+</dict>
+</plist>

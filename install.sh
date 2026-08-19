@@ -7,6 +7,8 @@
 # The opencode-tts plugin only knows about an `edge_tts` command; we give it
 # `opencode-tts-dispatch`, a lookalike CLI that routes by language.
 #
+# Supported: Linux (systemd user services) and macOS (launchd user agents).
+#
 # Usage:
 #   install.sh [--skip-voiceger]
 #
@@ -20,21 +22,29 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
 
-echo "==> opencode-tts voicevox+voiceger install ($REPO)"
+case "$(uname -s)" in
+  Linux)  OS=linux;  LIBEXT=so    ;;
+  Darwin) OS=macos;  LIBEXT=dylib ;;
+  *) echo "unsupported OS: $(uname -s) (need Linux or macOS)" >&2; exit 1 ;;
+esac
+
+echo "==> opencode-tts voicevox+voiceger install ($OS, $REPO)"
+
+command -v ffmpeg >/dev/null || {
+  echo "WARN: ffmpeg not found in PATH; the dispatcher needs it to emit MP3." >&2
+  [ "$OS" = macos ] && echo "      install it with: brew install ffmpeg" >&2
+}
 
 # --- 1. voicevox C shim (required) -----------------------------------------
-if [[ ! -d "$REPO/voicevox/assets" && ! -f "$REPO/voicevox/assets/core/lib/libvoicevox_core.so" ]]; then
-  if [[ -f "$HOME/dev/rpg-maker-clone/assets/voicevox/core/lib/libvoicevox_core.so" ]]; then
-    VOICEDIR="$HOME/dev/rpg-maker-clone/assets/voicevox"
-  else
-    echo "==> fetching VOICEVOX assets into $REPO/voicevox/assets"
-    VOICEDIR="$REPO/voicevox/assets"
-    bash "$REPO/voicevox/fetch-voicevox.sh" "$VOICEDIR"
-  fi
-else
+if [[ -n "${VOICEVOX_DIR:-}" ]]; then
+  VOICEDIR="$VOICEVOX_DIR"
+elif [[ -f "$REPO/voicevox/assets/core/lib/libvoicevox_core.$LIBEXT" ]]; then
   VOICEDIR="$REPO/voicevox/assets"
+else
+  echo "==> fetching VOICEVOX assets into $REPO/voicevox/assets"
+  VOICEDIR="$REPO/voicevox/assets"
+  bash "$REPO/voicevox/fetch-voicevox.sh" "$VOICEDIR"
 fi
-VOICEDIR="${VOICEVOX_DIR:-$VOICEDIR}"
 
 echo "==> building voicevox shim into $BIN"
 make -C "$REPO/voicevox" VOICEVOX_DIR="$VOICEDIR" PREFIX="$PREFIX" install
@@ -44,17 +54,38 @@ echo "==> installing opencode-tts-dispatch into $BIN"
 install -m 0755 "$REPO/opencode-tts-dispatch" "$BIN/opencode-tts-dispatch"
 
 # --- 3. voiceger server (optional) ------------------------------------------
+install_service_linux() {
+  local unit_dir="$HOME/.config/systemd/user"
+  echo "==> enabling voiceger systemd user unit"
+  mkdir -p "$unit_dir"
+  # The shipped unit carries a placeholder ExecStart; point it at this checkout.
+  sed "s|^ExecStart=.*|ExecStart=$REPO/voiceger/run-voiceger-server.sh|" \
+    "$REPO/voiceger/opencode-tts-voiceger.service" \
+    > "$unit_dir/opencode-tts-voiceger.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now opencode-tts-voiceger.service
+}
+
+install_service_macos() {
+  local label="com.opencode-tts.voiceger"
+  local agent_dir="$HOME/Library/LaunchAgents"
+  local plist="$agent_dir/$label.plist"
+  echo "==> loading voiceger launchd agent"
+  mkdir -p "$agent_dir" "$HOME/Library/Logs"
+  # launchd does no variable expansion; bake the absolute paths in.
+  sed -e "s|@REPO@|$REPO|g" -e "s|@HOME@|$HOME|g" \
+    "$REPO/voiceger/$label.plist" > "$plist"
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+}
+
 if [[ "${1:-}" != "--skip-voiceger" ]]; then
   if [[ -x "$REPO/voiceger/setup-voiceger.sh" ]]; then
     bash "$REPO/voiceger/setup-voiceger.sh" || {
       echo "WARN: voiceger setup incomplete; English TTS will fall back until" >&2
       echo "      setup-voiceger.sh finishes.  Japanese/CJK TTS is unaffected." >&2
     }
-    echo "==> enabling voiceger systemd user unit"
-    cp "$REPO/voiceger/opencode-tts-voiceger.service" \
-       "$HOME/.config/systemd/user/opencode-tts-voiceger.service"
-    systemctl --user daemon-reload
-    systemctl --user enable  --now opencode-tts-voiceger.service
+    if [[ "$OS" = macos ]]; then install_service_macos; else install_service_linux; fi
   else
     echo "WARN: voiceger setup script missing; English will speak via edge-tts if available." >&2
   fi
@@ -99,4 +130,9 @@ echo
 echo "Done. Restart opencode to pick up the new TTS backend."
 echo "  voicevox:   $BIN/opencode-tts-voicevox"
 echo "  dispatcher: $BIN/opencode-tts-dispatch"
-echo "  voiceger:   systemctl --user status opencode-tts-voiceger"
+if [[ "$OS" = macos ]]; then
+  echo "  voiceger:   launchctl print gui/$(id -u)/com.opencode-tts.voiceger"
+  echo "              log: ~/Library/Logs/opencode-tts-voiceger.log"
+else
+  echo "  voiceger:   systemctl --user status opencode-tts-voiceger"
+fi

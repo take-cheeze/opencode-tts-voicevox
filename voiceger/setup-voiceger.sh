@@ -12,7 +12,8 @@
 #
 # Steps:
 #   1. Create a Python 3.10 venv ($VOICEGER_VENV, default ~/dev/voiceger-venv)
-#   2. Install torch 2.1.2 (cu121 index) + requirements.txt
+#   2. Install torch 2.1.2 + requirements.txt (cu121 index on Linux, stock
+#      PyPI wheels on macOS — there is no CUDA build for Darwin)
 #   3. Install pyopenjtalk in a CLEAN env (Nix CFLAGS break the build)
 #   4. Create a jieba_fast forwarder shim (jieba_fast wheel build is broken)
 #   5. Download the Zundamon fine-tune + GPT-SoVITS pretrained models
@@ -22,6 +23,11 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  Linux)  OS=linux ;;
+  *) echo "unsupported OS: $(uname -s) (need Linux or macOS)" >&2; exit 1 ;;
+esac
 VOICEGER_SRC="${VOICEGER_SRC:-$HOME/dev/voiceger_v2}"
 VOICEGER_VENV="${VOICEGER_VENV:-$HOME/dev/voiceger-venv}"
 PYVER="3.10"
@@ -51,19 +57,37 @@ install_pinned() {
   uv pip install --python "$VOICEGER_VENV/bin/python" -q "$@"
 }
 
-echo "==> installing torch (cu121 index)"
-install_pinned --index-url https://download.pytorch.org/whl/cu121 \
-  "torch==2.1.2+cu121" "torchvision==0.16.2+cu121" "torchaudio==2.1.2+cu121" || true
-install_pinned -r "$REPO/voiceger/requirements.txt" 2>/dev/null || \
+if [[ "$OS" = macos ]]; then
+  # No CUDA on Darwin: the stock wheels are CPU + Metal (MPS).
+  echo "==> installing torch (macOS wheels)"
+  install_pinned "torch==2.1.2" "torchvision==0.16.2" "torchaudio==2.1.2" || true
+else
+  echo "==> installing torch (cu121 index)"
+  install_pinned --index-url https://download.pytorch.org/whl/cu121 \
+    "torch==2.1.2+cu121" "torchvision==0.16.2+cu121" "torchaudio==2.1.2+cu121" || true
+fi
+install_pinned -r "$REPO/requirements.txt" 2>/dev/null || \
   install_pinned numpy==1.26.4 librosa==0.9.2 soundfile==0.14.0 scipy==1.15.3 \
     transformers==4.51.3 fastapi uvicorn pydantic nltk wordsegment unidecode \
     inflect g2p-en jamo g2pk2 pypinyin cn2an py3langid einops matplotlib \
     numba llvmlite coverage setuptools pandas ffmpeg-python
 
 # --- pyopenjtalk (source build needs a clean env) ---------------------------
+# It compiles C++, so the build must not see Nix's CFLAGS. Rebuild PATH from
+# scratch; on macOS it also needs cmake and the Xcode command line tools.
+CLEAN_PATH="/usr/local/bin:/usr/bin:/bin"
+for extra in "$HOME/.nix-profile/bin" /opt/homebrew/bin; do
+  [ -d "$extra" ] && CLEAN_PATH="$extra:$CLEAN_PATH"
+done
 if ! "$VOICEGER_VENV/bin/python" -c "import pyopenjtalk" 2>/dev/null; then
   echo "==> installing pyopenjtalk (clean env build)"
-  env -i PATH="$HOME/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin" HOME="$HOME" \
+  if [[ "$OS" = macos ]]; then
+    xcode-select -p >/dev/null 2>&1 || \
+      echo "WARN: Xcode command line tools missing (xcode-select --install)" >&2
+    command -v cmake >/dev/null || \
+      echo "WARN: cmake not found; pyopenjtalk needs it (brew install cmake)" >&2
+  fi
+  env -i PATH="$CLEAN_PATH" HOME="$HOME" \
     uv pip install --python "$VOICEGER_VENV/bin/python" pyopenjtalk || \
     echo "WARN: pyopenjtalk build failed — Japanese/Korean TTS will be limited" >&2
 fi
