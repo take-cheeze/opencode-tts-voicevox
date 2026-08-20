@@ -25,6 +25,7 @@
     <key>HOME</key><string>@HOME@</string>
     <key>VOICEGER_PORT</key><string>18123</string>
     <key>VOICEGER_DEVICE</key><string>cpu</string>
+    <key>VOICEGER_ENGINE</key><string>audio8</string>
   </dict>
 
   <key>RunAtLoad</key><true/>

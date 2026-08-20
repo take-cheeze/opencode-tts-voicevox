@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
-# Set up the voiceger (GPT-SoVITS) Zundamon TTS stack, fully local.
+# Set up the voiceger Zundamon TTS stack, fully local.
 #
-#   setup-voiceger.sh [--clone-src]
+#   setup-voiceger.sh [--clone-src] [--with-raon] [--with-audio8-onnx]
 #
-# Needs the voiceger_v2 source tree (~37 MiB): it vendors GPT-SoVITS,
-# LangSegment, the NLTK data and the reference audio the voice is cloned from.
-# Looked up as $VOICEGER_SRC, default ~/dev/voiceger_v2.  With --clone-src it
-# is cloned from https://github.com/zunzun999/voiceger_v2 if missing.
+# Needs a voiceger_v2-shaped tree (~few MiB) purely for its reference/
+# directory: the wav clip + transcript both engines clone the Zundamon voice
+# from. Looked up as $VOICEGER_SRC, default ~/dev/voiceger_v2. With
+# --clone-src it is cloned from https://github.com/zunzun999/voiceger_v2 if
+# missing.
 #
 # Steps:
-#   1. Create a Python 3.10 venv ($VOICEGER_VENV, default ~/dev/voiceger-venv)
-#   2. Install torch 2.1.2 + requirements.txt (cu121 index on Linux, stock
-#      PyPI wheels on macOS — there is no CUDA build for Darwin)
-#   3. Install pyopenjtalk in a CLEAN env (Nix CFLAGS break the build)
-#   4. Create a jieba_fast forwarder shim (jieba_fast wheel build is broken)
-#   5. Download the Zundamon fine-tune + GPT-SoVITS pretrained models
-#   6. Copy the NLTK English tagger data into ~/nltk_data
+#   1. Create a Python venv ($VOICEGER_VENV, default ~/dev/voiceger-venv)
+#   2. Install torch + requirements.txt (cu121 index on Linux, stock PyPI
+#      wheels on macOS -- there is no CUDA build for Darwin)
+#   3. --with-raon only: clone krafton-ai/Raon-OpenTTS and `pip install -e` it
+#   4. --with-audio8-onnx only: clone Audio8-AI/Audio8_TTS, install its
+#      onnx_runtime deps into this same venv, and download
+#      Audio8-TTS-Preview-0.6B-ONNX-INT4 (~1GB)
+#
+# The default engine (Audio8-TTS-Preview-0.1b) downloads its own weights
+# through transformers' normal Hugging Face cache the first time the server
+# starts -- there is nothing to pre-fetch here.
 #
 # Idempotent: re-running over an existing setup skips what is already present.
 set -euo pipefail
@@ -29,13 +34,22 @@ esac
 VOICEGER_SRC="${VOICEGER_SRC:-$HOME/dev/voiceger_v2}"
 VOICEGER_VENV="${VOICEGER_VENV:-$HOME/dev/voiceger-venv}"
 VOICEGER_GIT="${VOICEGER_GIT:-https://github.com/zunzun999/voiceger_v2}"
+RAON_SRC="${RAON_SRC:-$HOME/dev/Raon-OpenTTS}"
+RAON_GIT="${RAON_GIT:-https://github.com/krafton-ai/Raon-OpenTTS}"
+VOICEGER_ONNX_SRC="${VOICEGER_ONNX_SRC:-$HOME/dev/Audio8_TTS}"
+VOICEGER_ONNX_GIT="${VOICEGER_ONNX_GIT:-https://github.com/Audio8-AI/Audio8_TTS}"
+VOICEGER_ONNX_MODEL="${VOICEGER_ONNX_MODEL:-Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4}"
 PYVER="3.10"
 
 clone_src=0
+with_raon=0
+with_audio8_onnx=0
 for arg in "$@"; do
   case "$arg" in
     --clone-src) clone_src=1 ;;
-    *) echo "unknown argument: $arg (usage: setup-voiceger.sh [--clone-src])" >&2; exit 2 ;;
+    --with-raon) with_raon=1 ;;
+    --with-audio8-onnx) with_audio8_onnx=1 ;;
+    *) echo "unknown argument: $arg (usage: setup-voiceger.sh [--clone-src] [--with-raon] [--with-audio8-onnx])" >&2; exit 2 ;;
   esac
 done
 
@@ -54,13 +68,10 @@ if [[ ! -d "$VOICEGER_SRC" ]]; then
     exit 1
   fi
 fi
-for required in GPT-SoVITS reference; do
-  [[ -d "$VOICEGER_SRC/$required" ]] || {
-    echo "voiceger: $VOICEGER_SRC does not look like a voiceger_v2 tree" >&2
-    echo "  (missing $required/)" >&2
-    exit 1
-  }
-done
+if [[ ! -d "$VOICEGER_SRC/reference" ]]; then
+  echo "voiceger: $VOICEGER_SRC does not look like a voiceger_v2 tree (missing reference/)" >&2
+  exit 1
+fi
 
 command -v uv >/dev/null || { echo "need uv (python installer) in PATH" >&2; exit 1; }
 
@@ -72,106 +83,70 @@ if [[ ! -x "$VOICEGER_VENV/bin/python" ]]; then
 fi
 
 install_pinned() {
-  # install with a clean env only where the Nix PYTHONPATH would pollute the
-  # wheel build tag (source-built wheels pick up cp313 from Nix CFLAGS).
   uv pip install --python "$VOICEGER_VENV/bin/python" -q "$@"
 }
 
 if [[ "$OS" = macos ]]; then
   # No CUDA on Darwin: the stock wheels are CPU + Metal (MPS).
   echo "==> installing torch (macOS wheels)"
-  install_pinned "torch==2.1.2" "torchvision==0.16.2" "torchaudio==2.1.2" || true
+  install_pinned torch torchaudio || true
 else
   echo "==> installing torch (cu121 index)"
-  install_pinned --index-url https://download.pytorch.org/whl/cu121 \
-    "torch==2.1.2+cu121" "torchvision==0.16.2+cu121" "torchaudio==2.1.2+cu121" || true
+  install_pinned --index-url https://download.pytorch.org/whl/cu121 torch torchaudio || true
 fi
 # No fallback list here on purpose: a partial install produces a venv that
-# looks fine and then dies with an opaque ModuleNotFoundError deep inside
-# GPT-SoVITS.  Fail loudly instead, with the resolver's explanation.
+# looks fine and then dies with an opaque ModuleNotFoundError deep inside the
+# model's remote code. Fail loudly instead, with the resolver's explanation.
 if ! install_pinned -r "$REPO/requirements.txt"; then
   echo "ERROR: could not install $REPO/requirements.txt (see resolver output above)." >&2
   exit 1
 fi
 
-# --- pyopenjtalk (source build needs a clean env) ---------------------------
-# It compiles C++, so the build must not see Nix's CFLAGS. Rebuild PATH from
-# scratch; on macOS it also needs cmake and the Xcode command line tools.
-CLEAN_PATH="/usr/local/bin:/usr/bin:/bin"
-for extra in "$HOME/.nix-profile/bin" /opt/homebrew/bin; do
-  [ -d "$extra" ] && CLEAN_PATH="$extra:$CLEAN_PATH"
-done
-if ! "$VOICEGER_VENV/bin/python" -c "import pyopenjtalk" 2>/dev/null; then
-  echo "==> installing pyopenjtalk (clean env build)"
-  if [[ "$OS" = macos ]]; then
-    xcode-select -p >/dev/null 2>&1 || \
-      echo "WARN: Xcode command line tools missing (xcode-select --install)" >&2
-    command -v cmake >/dev/null || \
-      echo "WARN: cmake not found; pyopenjtalk needs it (brew install cmake)" >&2
+# --- optional: Raon-OpenTTS (VOICEGER_ENGINE=raon) --------------------------
+if [[ "$with_raon" -eq 1 ]]; then
+  echo "WARNING: Raon-OpenTTS-1B is English-only, its checkpoint is ~16.7GB," >&2
+  echo "         and it has not been verified to run acceptably on CPU here." >&2
+  echo "         Only enable VOICEGER_ENGINE=raon on a box with a working GPU." >&2
+  if [[ ! -d "$RAON_SRC" ]]; then
+    echo "==> cloning $RAON_GIT -> $RAON_SRC"
+    mkdir -p "$(dirname "$RAON_SRC")"
+    git clone --depth 1 "$RAON_GIT" "$RAON_SRC"
   fi
-  env -i PATH="$CLEAN_PATH" HOME="$HOME" \
-    uv pip install --python "$VOICEGER_VENV/bin/python" pyopenjtalk || \
-    echo "WARN: pyopenjtalk build failed — Japanese/Korean TTS will be limited" >&2
+  echo "==> installing Raon-OpenTTS into the venv"
+  install_pinned -e "$RAON_SRC" || {
+    echo "WARN: Raon-OpenTTS install failed -- VOICEGER_ENGINE=raon will not work" >&2
+    echo "      (Japanese/CJK and the default audio8 English path are unaffected)" >&2
+  }
 fi
 
-# --- jieba_fast forwarder shim ---------------------------------------------
-SITE="$("$VOICEGER_VENV/bin/python" -c "import site;print(site.getsitepackages()[0])")"
-mkdir -p "$SITE/jieba_fast"
-cat > "$SITE/jieba_fast/__init__.py" <<'PY'
-import jieba as _jieba
-lcut = _jieba.lcut
-cut = _jieba.cut
-PY
-cat > "$SITE/jieba_fast/posseg.py" <<'PY'
-from jieba.posseg import lcut, cut  # noqa: F401
-PY
-echo "==> jieba_fast shim at $SITE/jieba_fast"
-uv pip install --python "$VOICEGER_VENV/bin/python" -q jieba >/dev/null 2>&1 || true
-# LangSegment ships as a local package inside the voiceger source tree.
-[ -d "$VOICEGER_SRC/LangSegment-0.3.5" ] && \
-  install_pinned "$VOICEGER_SRC/LangSegment-0.3.5" 2>/dev/null || true
-install_pinned py3langid 2>/dev/null || true
-
-# --- NLTK English tagger ----------------------------------------------------
-NLTK="$HOME/nltk_data"
-if [ -d "$VOICEGER_SRC/nltk_data" ]; then
-  mkdir -p "$NLTK"
-  cp -rn "$VOICEGER_SRC/nltk_data/." "$NLTK/" 2>/dev/null || true
-  echo "==> nltk_data -> $NLTK"
+# --- optional: Audio8-TTS-Preview-0.6B-ONNX-INT4 (VOICEGER_ENGINE=audio8-onnx) --
+if [[ "$with_audio8_onnx" -eq 1 ]]; then
+  if [[ ! -d "$VOICEGER_ONNX_SRC" ]]; then
+    echo "==> cloning $VOICEGER_ONNX_GIT -> $VOICEGER_ONNX_SRC"
+    mkdir -p "$(dirname "$VOICEGER_ONNX_SRC")"
+    git clone --depth 1 "$VOICEGER_ONNX_GIT" "$VOICEGER_ONNX_SRC"
+  fi
+  echo "==> installing Audio8 ONNX runtime deps into the venv"
+  # arktts_runtime only needs onnxruntime/scipy/tokenizers beyond what
+  # requirements.txt already installed (numpy, soundfile) -- it runs fine
+  # under this venv's Python even though the standalone onnx_runtime project
+  # asks for 3.11+, so no second venv is needed.
+  install_pinned onnxruntime scipy tokenizers "huggingface_hub[cli]" || {
+    echo "WARN: Audio8 ONNX runtime deps failed to install -- VOICEGER_ENGINE=audio8-onnx will not work" >&2
+  }
+  MODEL_DIR="$VOICEGER_ONNX_SRC/onnx_runtime/model"
+  if [[ ! -f "$MODEL_DIR/runtime_manifest.json" ]]; then
+    echo "==> downloading $VOICEGER_ONNX_MODEL (~1GB)"
+    "$VOICEGER_VENV/bin/hf" download "$VOICEGER_ONNX_MODEL" --local-dir "$MODEL_DIR" || {
+      echo "WARN: Audio8 ONNX model download failed -- VOICEGER_ENGINE=audio8-onnx will not work" >&2
+    }
+  fi
 fi
-
-# --- models -----------------------------------------------------------------
-GS="$VOICEGER_SRC/GPT-SoVITS"
-PM="$GS/GPT_SoVITS/pretrained_models"
-fetch() { # url dest
-  if [[ -s "$2" ]]; then echo "    skip (present): $2"; return; fi
-  mkdir -p "$(dirname "$2")"
-  echo "    download: $1"
-  curl -fL --retry 3 --retry-delay 2 -o "$2" "$1"
-}
-
-echo "==> GPT-SoVITS pretrained (if missing)"
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-hubert-base/pytorch_model.bin" \
-  "$PM/chinese-hubert-base/pytorch_model.bin" || true
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-hubert-base/config.json" \
-  "$PM/chinese-hubert-base/config.json" || true
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-hubert-base/preprocessor_config.json" \
-  "$PM/chinese-hubert-base/preprocessor_config.json" || true
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-roberta-wwm-ext-large/pytorch_model.bin" \
-  "$PM/chinese-roberta-wwm-ext-large/pytorch_model.bin" || true
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-roberta-wwm-ext-large/config.json" \
-  "$PM/chinese-roberta-wwm-ext-large/config.json" || true
-fetch "https://huggingface.co/lj1995/GPT-SoVITS/resolve/main/chinese-roberta-wwm-ext-large/tokenizer.json" \
-  "$PM/chinese-roberta-wwm-ext-large/tokenizer.json" || true
-
-echo "==> Zundamon fine-tuned weights (if missing)"
-fetch "https://huggingface.co/zunzunpj/zundamon_GPT-SoVITS/resolve/main/GPT_weights_v2/zudamon_style_1-e15.ckpt" \
-  "$GS/GPT_weights_v2/zudamon_style_1-e15.ckpt" || true
-fetch "https://huggingface.co/zunzunpj/zundamon_GPT-SoVITS/resolve/main/SoVITS_weights_v2/zudamon_style_1_e8_s96.pth" \
-  "$GS/SoVITS_weights_v2/zudamon_style_1_e8_s96.pth" || true
 
 echo
 echo "voiceger setup complete."
 echo "  venv   : $VOICEGER_VENV"
 echo "  server : python tts_server.py   (see run-voiceger-server.sh)"
 echo "Verify  : PYTHONPATH= $VOICEGER_VENV/bin/python -c 'import torch,transformers;print(torch.__version__)'"
+[[ "$with_raon" -eq 1 ]] && echo "  raon   : VOICEGER_ENGINE=raon (opt-in, see warning above)"
+[[ "$with_audio8_onnx" -eq 1 ]] && echo "  audio8-onnx : VOICEGER_ENGINE=audio8-onnx (opt-in, ~1GB runtime footprint)"

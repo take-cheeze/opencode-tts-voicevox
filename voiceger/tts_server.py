@@ -1,32 +1,31 @@
-"""Voiceger (GPT-SoVITS) Zundamon TTS HTTP server.
+"""Voiceger Zundamon TTS HTTP server.
 
-Loads the Zundamon fine-tune once, then serves:
-    POST /tts   {"text": "...", "text_language": "English|Japanese|Korean|..."}
-                -> {"message": "ok", "file_path": "/abs/path.wav"}
+Loads a zero-shot voice-cloning TTS model once, then serves:
+    POST /tts   {"text": "...", "text_language": "English|Japanese|..."}
+                -> {"message": "ok", "file_path": "/abs/path.wav", "sampling_rate": int}
     GET  /ping  -> {"ok": true, ...}
 
-Paths are resolved from the environment (or auto-discovered):
-    VOICEGER_SRC   voiceger_v2 repo root (contains GPT-SoVITS/, reference/)
-                   (default: $HOME/dev/voiceger_v2)
+VOICEGER_ENGINE selects the model:
+    audio8      (default)  Audio8/Audio8-TTS-Preview-0.1b -- multilingual, CPU-viable
+    audio8-onnx             Audio8-TTS-Preview-0.6B-ONNX-INT4 -- larger model, smaller
+                            runtime footprint (official quantized build); needs
+                            setup-voiceger.sh --with-audio8-onnx
+    raon                    KRAFTON/Raon-OpenTTS-1B -- English-only, heavy, GPU-recommended
+
+Both engines clone the Zundamon voice from a reference clip, resolved from the
+environment (or auto-discovered):
+    VOICEGER_SRC   tree containing reference/ (default: $HOME/dev/voiceger_v2)
 The launcher run-voiceger-server.sh sets VOICEGER_SRC + a clean env.
 """
 import os
 import sys
+import tempfile
 
 HOME = os.path.expanduser("~")
 VOICEGER_SRC = os.environ.get("VOICEGER_SRC", os.path.join(HOME, "dev", "voiceger_v2"))
-GS = os.path.join(VOICEGER_SRC, "GPT-SoVITS")
+ENGINE = os.environ.get("VOICEGER_ENGINE", "audio8").lower()
 
-for p in (GS, os.path.join(GS, "GPT_SoVITS")):
-    if os.path.isdir(p) and p not in sys.path:
-        sys.path.insert(0, p)
 
-GPT = os.path.join(GS, "GPT_weights_v2/zudamon_style_1-e15.ckpt")
-SOVITS = os.path.join(GS, "SoVITS_weights_v2/zudamon_style_1_e8_s96.pth")
-BERT = os.environ.get("VOICEGER_BERT",
-    os.path.join(GS, "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"))
-CNHUBERT = os.environ.get("VOICEGER_CNHUBERT",
-    os.path.join(GS, "GPT_SoVITS/pretrained_models/chinese-hubert-base"))
 def _default_ref():
     """Pick the voice-cloning reference clip out of the voiceger tree.
 
@@ -47,93 +46,187 @@ REF = os.environ.get("VOICEGER_REF") or _default_ref()
 REF_TEXT = os.environ.get("VOICEGER_REF_TEXT",
     os.path.join(VOICEGER_SRC, "reference/ref_text.txt"))
 
-# Check the artefacts themselves, not just their parent directory -- a missing
-# weight file used to surface much later as an opaque failure mid-inference.
-for label, path, kind in [("GPT-SoVITS dir", GS, "dir"),
-                          ("GPT weights", GPT, "file"),
-                          ("SoVITS weights", SOVITS, "file"),
-                          ("BERT", BERT, "dir"),
-                          ("CNHuBERT", CNHUBERT, "dir"),
-                          ("reference wav", REF, "file"),
-                          ("reference text", REF_TEXT, "file")]:
-    ok = os.path.isdir(path) if kind == "dir" else os.path.isfile(path)
-    if not ok:
+for label, path in [("reference wav", REF), ("reference text", REF_TEXT)]:
+    if not os.path.isfile(path):
         raise SystemExit(f"voiceger: missing {label}: {path}\n"
-                         f"  (set VOICEGER_SRC correctly / run setup-voiceger.sh)")
+                         f"  (set VOICEGER_SRC to a voiceger_v2 checkout, or "
+                         f"VOICEGER_REF/VOICEGER_REF_TEXT directly)")
+
+with open(REF_TEXT, encoding="utf-8") as fh:
+    REF_TEXT_STR = fh.read().strip()
 
 device = os.environ.get("VOICEGER_DEVICE", "cpu")  # cpu | cuda | mps (Apple GPU)
-is_half = os.environ.get("VOICEGER_IS_HALF", "false").lower() == "true"
-
-os.environ.setdefault("version", "v2")
-os.environ["device"] = device
-os.environ["is_half"] = str(is_half)
-os.environ["bert_path"] = BERT
-os.environ["cnhubert_base_path"] = CNHUBERT
-os.environ["language"] = "Auto"
-os.chdir(GS)  # TTS writes GPT_SoVITS/configs/ and uses relative fallbacks
 
 import numpy as np          # noqa: E402
 import soundfile as sf      # noqa: E402
-import tempfile             # noqa: E402
 from fastapi import FastAPI, HTTPException   # noqa: E402
 from pydantic import BaseModel                 # noqa: E402
-from TTS_infer_pack.TTS import TTS             # noqa: E402
 
-print(f"Loading Zundamon TTS models (device={device}) ...", flush=True)
-cfg = {
-    "device": device, "is_half": is_half, "version": "v2",
-    "t2s_weights_path": GPT, "vits_weights_path": SOVITS,
-    "bert_base_path": BERT, "cnhuhbert_base_path": CNHUBERT,
-}
-tts = TTS(configs={"custom": cfg, "default": cfg})
-with open(REF_TEXT, encoding="utf-8") as fh:
-    REF_TEXT_STR = fh.read().strip()
-print("TTS ready.", flush=True)
 
-_LANG_TAG = {
-    "English": "en", "Japanese": "all_ja", "Korean": "all_ko",
-    "Cantonese": "all_yue", "Chinese": "all_zh",
-    "Japanese-English Mixed": "ja", "Chinese-English Mixed": "zh",
-    "Korean-English Mixed": "ko", "Cantonese-English Mixed": "yue",
-    "Multilingual Mixed": "auto",
-}
+class Engine:
+    """Common interface both engines implement."""
 
-app = FastAPI(title="voiceger-tts", version="0.2.0")
+    name = "unknown"
+    sample_rate = 0
+
+    def synthesize(self, text, lang):
+        raise NotImplementedError
+
+
+class Audio8Engine(Engine):
+    name = "audio8"
+
+    _LANG_TAG = {
+        "English": "en", "Chinese": "zh", "Japanese": "ja", "Korean": "ko",
+        "German": "de", "Spanish": "es", "French": "fr", "Italian": "it",
+    }
+
+    def __init__(self):
+        import torch
+        from transformers import AutoModel, AutoProcessor
+
+        model_id = os.environ.get("VOICEGER_AUDIO8_MODEL", "Audio8/Audio8-TTS-Preview-0.1b")
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        print(f"Loading {model_id} (device={device}) ...", flush=True)
+        self._processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        self._model = (AutoModel.from_pretrained(model_id, trust_remote_code=True, dtype=dtype)
+                       .eval().to(device))
+        self.sample_rate = self._model.config.codec_sample_rate
+        print("Audio8 TTS ready.", flush=True)
+
+    def synthesize(self, text, lang):
+        inputs = self._processor(text=[text], reference_audio=[REF],
+                                 reference_text=[REF_TEXT_STR], return_tensors="pt").to(device)
+        output = self._model.generate(
+            **inputs, max_new_tokens=1024, temperature=0.7, top_p=0.9,
+            top_k=50, do_sample=True, return_dict_in_generate=True)
+        waveforms, lengths = self._model.decode_audio(output.codes)
+        wav = waveforms[0]
+        if lengths is not None:
+            wav = wav[..., : int(lengths[0])]
+        return wav.detach().to("cpu").float().numpy().squeeze()
+
+
+class Audio8OnnxEngine(Engine):
+    """Audio8-TTS-Preview-0.6B-ONNX-INT4 via the official arktts_runtime.
+
+    Larger model than the default `audio8` engine but a much smaller runtime
+    footprint (~1GB vs ~1.4-5GB) since it's INT4-quantized ONNX, not PyTorch.
+    Needs `setup-voiceger.sh --with-audio8-onnx` to clone
+    github.com/Audio8-AI/Audio8_TTS and download the model.
+
+    Unlike the other engines, this one registers a named "voice profile"
+    once (from the same REF/REF_TEXT clip) instead of taking reference audio
+    per request -- registration runs once at startup here so per-request
+    latency matches the others.
+    """
+
+    name = "audio8-onnx"
+    sample_rate = 44100
+
+    def __init__(self):
+        onnx_src = os.environ.get("VOICEGER_ONNX_SRC", os.path.join(HOME, "dev", "Audio8_TTS"))
+        runtime_dir = os.path.join(onnx_src, "onnx_runtime")
+        if runtime_dir not in sys.path:
+            sys.path.insert(0, runtime_dir)
+        model_dir = os.environ.get("VOICEGER_ONNX_MODEL_DIR", os.path.join(runtime_dir, "model"))
+        voices_dir = os.environ.get("VOICEGER_ONNX_VOICES_DIR", os.path.join(runtime_dir, "voices"))
+        threads = int(os.environ.get("VOICEGER_ONNX_THREADS", "5"))
+        self._voice = os.environ.get("VOICEGER_ONNX_VOICE", "zundamon")
+
+        from arktts_runtime.registration import VoiceRegistration
+        from arktts_runtime.runtime import ArkTtsRuntime
+
+        print(f"Loading Audio8 ONNX runtime from {model_dir} ...", flush=True)
+        self._runtime = ArkTtsRuntime(model_dir, voices_dir, threads=threads)
+        # Registers every start-up (overwrite=True) so this stays in sync with
+        # whatever REF/REF_TEXT point at, the same way the other engines take
+        # reference audio fresh on every request.
+        from pathlib import Path
+
+        registration = VoiceRegistration(
+            Path(model_dir) / "registration",
+            self._runtime.voices.root,
+            str(self._runtime.manifest["model_fingerprint"]),
+        )
+        with open(REF, "rb") as fh:
+            ref_bytes = fh.read()
+        registration.register(ref_bytes, os.path.basename(REF), REF_TEXT_STR, self._voice, overwrite=True)
+        self.sample_rate = int(self._runtime.manifest["sample_rate"])
+        print("Audio8 ONNX runtime ready.", flush=True)
+
+    def synthesize(self, text, lang):
+        import random
+
+        audio, _codes = self._runtime.synthesize(
+            text=text, voice=self._voice, max_new_tokens=1024,
+            temperature=0.7, top_p=0.9, top_k=50,
+            seed=random.randint(0, 2**31 - 1),
+        )
+        return audio
+
+
+class RaonEngine(Engine):
+    """English-only F5-TTS-based model. Heavy (16.7GB checkpoint) and
+    unverified for CPU throughput -- opt in with VOICEGER_ENGINE=raon on a
+    box that ran `setup-voiceger.sh --with-raon`."""
+
+    name = "raon"
+    sample_rate = 16000
+
+    def __init__(self):
+        from f5_tts.infer.utils_infer import load_model, load_vocoder
+        from f5_tts.model import DiT
+
+        model_id = os.environ.get("VOICEGER_RAON_MODEL", "KRAFTON/Raon-OpenTTS-1B")
+        vocoder_id = os.environ.get("VOICEGER_RAON_VOCODER", "speechbrain/tts-hifigan-libritts-16kHz")
+        print(f"Loading {model_id} (device={device}) ...", flush=True)
+        # F5-TTS "Base" hyperparameters -- Raon's model card does not publish
+        # its DiT config, so this assumes the standard F5-TTS-Base shape and
+        # will fail loudly (state_dict mismatch) on load if that's wrong.
+        model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+        self._vocoder = load_vocoder(vocoder_name="vocos", is_local=False, local_path=vocoder_id)
+        self._model = load_model(DiT, model_cfg, model_id, device=device)
+        self._infer_process = __import__(
+            "f5_tts.infer.utils_infer", fromlist=["infer_process"]).infer_process
+        print("Raon TTS ready.", flush=True)
+
+    def synthesize(self, text, lang):
+        if lang != "English":
+            raise HTTPException(400, f"raon engine is English-only, got: {lang}")
+        wav, sr, _ = self._infer_process(REF, REF_TEXT_STR, text, self._model, self._vocoder)
+        self.sample_rate = sr
+        return np.asarray(wav)
+
+
+_ENGINES = {"audio8": Audio8Engine, "audio8-onnx": Audio8OnnxEngine, "raon": RaonEngine}
+if ENGINE not in _ENGINES:
+    raise SystemExit(f"voiceger: unknown VOICEGER_ENGINE {ENGINE!r} (want: {', '.join(_ENGINES)})")
+engine = _ENGINES[ENGINE]()
+
+app = FastAPI(title="voiceger-tts", version="0.3.0")
 
 
 class TtsRequest(BaseModel):
     text: str
     text_language: str = "English"
-    top_k: int = 5
-    top_p: float = 1.0
-    temperature: float = 1.0
 
 
 @app.get("/ping")
 def ping():
-    return {"ok": True, "voice": "zundamon", "device": device}
+    return {"ok": True, "voice": "zundamon", "engine": engine.name, "device": device}
 
 
 @app.post("/tts")
 def tts_endpoint(req: TtsRequest):
-    tag = _LANG_TAG.get(req.text_language, "en")
-    if tag not in tts.configs.languages:
-        raise HTTPException(400, f"unsupported text_language: {req.text_language}")
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="voiceger-tts-")
     os.close(fd)
-    sr = 32000
     try:
-        for sr, wav in tts.run(inputs={
-            "text": req.text, "text_lang": tag,
-            "ref_audio_path": REF, "prompt_text": REF_TEXT_STR, "prompt_lang": "ja",
-            "top_k": req.top_k, "top_p": req.top_p, "temperature": req.temperature,
-            "speed_factor": 1.0, "return_fragment": False,
-        }):
-            audio = wav.astype(np.int16) if wav.dtype in (np.float32, np.float16) else wav
-            sf.write(path, audio, sr, format="WAV", subtype="PCM_16")
+        audio = engine.synthesize(req.text, req.text_language)
+        sf.write(path, audio, engine.sample_rate, format="WAV", subtype="PCM_16")
         if os.path.getsize(path) == 0:
             raise HTTPException(500, "TTS produced no audio")
-        return {"message": "ok", "file_path": path, "sampling_rate": int(sr)}
+        return {"message": "ok", "file_path": path, "sampling_rate": int(engine.sample_rate)}
     except HTTPException:
         raise
     except Exception as exc:

@@ -2,7 +2,7 @@
 """edge-tts lookalike that dispatches speech by language.
 
   CJK text (kana / Han / Hangul)   -> VOICEVOX CORE C shim  (fast, offline)
-  everything else (English, ...)   -> voiceger HTTP server  (Zundamon GPT-SoVITS)
+  everything else (English, ...)   -> voiceger HTTP server  (Zundamon voice clone)
 
 Accepts exactly the edge-tts CLI the opencode-tts plugin passes:
     --voice V --rate R --volume P --text T --write-media OUT.mp3
@@ -134,7 +134,7 @@ def speak_via_voicevox(args):
 def voiceger_post(body):
     """POST /tts, retrying briefly while a cold server warms up.
 
-    Loading the GPT-SoVITS weights takes 1-2 minutes on CPU, and until that
+    Loading the TTS model weights takes 1-2 minutes on CPU, and until that
     finishes the port is simply refused rather than slow -- so a summary that
     lands just after boot would otherwise fail outright.
     """
@@ -241,7 +241,7 @@ def synth_via_forward(args, target):
     """Fetch finished audio from the receiver. True if args.out was written."""
     req = forward_request(target, "/synth", args)
     try:
-        # Generous: the far end may be doing GPT-SoVITS on CPU.
+        # Generous: the far end may be doing TTS inference on CPU.
         with urllib.request.urlopen(req, timeout=300) as resp:
             audio = resp.read()
         if not audio:
