@@ -59,6 +59,12 @@ Hau	ハウ	0	PROPER_NOUN	10
 ONNX	オニキス	0	PROPER_NOUN	10
 onnxruntime	オニキスランタイム	0	PROPER_NOUN	10
 ORT	オニキスランタイム	0	PROPER_NOUN	10
+Discord	ディスコード	0	PROPER_NOUN	10
+webhook	ウェブフック	1	COMMON_NOUN	10
+bot	ボット	1	COMMON_NOUN	10
+DM	ディーエム	0	PROPER_NOUN	10
+launchd	ローンチディー	0	PROPER_NOUN	10
+plist	ピーリスト	0	PROPER_NOUN	10
 GitHub	ギットハブ	2	PROPER_NOUN	10
 npm	エヌピーエム	0	PROPER_NOUN	10
 Docker	ドッカー	1	PROPER_NOUN	10
