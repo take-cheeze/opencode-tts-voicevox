@@ -195,6 +195,73 @@ exact values onto your clipboard instead of you retyping them.
 `claude-code/setup-tunnel.sh --off` tears the Funnel down again without
 touching `claude-tts-speakd` or your token.
 
+## Notification banners (Discord, etc.)
+
+`mac-notify-watch` speaks *any app's* notification banners aloud -- Discord
+included -- by watching NotificationCenter's Accessibility tree for new
+banner windows and reading the sender/title/body text straight out of it,
+then handing that to `claude-tts-speak --text`. There is no public API for
+"tell me when an app posts a notification", so this is the same technique
+other notification-mirroring tools use.
+
+```
+Discord (or any app) posts a notification
+        │  NotificationCenter draws a banner
+        ▼
+  mac-notify-watch ── AXObserver on NotificationCenter ──► sender/title/body text
+        │
+        ▼
+  claude-tts-speak --translate --text "..." ──► dispatcher ──► VOICEVOX/voiceger ──► afplay
+```
+
+### Setup
+
+```sh
+./install.sh --with-notify-watch     # macOS only; combine with other flags freely
+```
+
+This builds the binary, writes `~/Library/LaunchAgents/com.opencode-tts.notify-watch.plist`,
+and loads it -- but it does nothing until you grant it Accessibility access:
+**System Settings > Privacy & Security > Accessibility**, add
+`~/.local/bin/mac-notify-watch` (a "wants access" prompt should appear the
+first time it runs; add it there, or find it in the file picker). It picks
+this up automatically, no restart needed.
+
+By default it speaks *every* banner from every app. Narrow that with
+`NOTIFY_TTS_INCLUDE`/`NOTIFY_TTS_EXCLUDE` in the plist's `EnvironmentVariables`
+block (comma-separated, matched against the banner's sender/app-name text,
+case-insensitive) -- e.g. `NOTIFY_TTS_INCLUDE=discord` to only speak Discord.
+Reload after editing:
+
+```sh
+launchctl bootout gui/$(id -u)/com.opencode-tts.notify-watch
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-tts.notify-watch.plist
+```
+
+| Variable | Default | |
+|---|---|---|
+| `NOTIFY_TTS_SPEAK` | `~/.local/bin/claude-tts-speak` | what actually speaks the text |
+| `NOTIFY_TTS_VOICE` | `CLAUDE_TTS_VOICE`'s default (Zundamon) | VOICEVOX voice for notifications, e.g. `hau`, `metan:sexy` -- overrides `CLAUDE_TTS_VOICE` for this process only, so notifications can sound different from Claude Code replies |
+| `NOTIFY_TTS_INCLUDE` | unset (all apps) | comma-separated substrings; only speak a banner whose sender/app name contains one |
+| `NOTIFY_TTS_EXCLUDE` | unset | comma-separated substrings to always skip, checked first |
+| `NOTIFY_TTS_MAXCHARS` | `200` | cap on how much of a notification gets spoken |
+| `NOTIFY_TTS_DEDUP_SECS` | `30` | drop an identical banner seen again within this many seconds (some banners fire more than one AX event) |
+| `NOTIFY_TTS_DEBUG` | unset | `1` to log what it sees/skips/speaks to `~/Library/Logs/mac-notify-watch.log` |
+
+**Limits, by construction:**
+- Only sees notifications that actually draw a banner/alert on screen -- Do
+  Not Disturb, Scheduled Summary delivery, and per-app "silence" settings are
+  as invisible to this as they are to you.
+- If NotificationCenter itself restarts (a crash, essentially never in normal
+  use), `mac-notify-watch` needs a restart too -- it attaches to a specific
+  process id, not "whichever process currently owns the bundle id". `launchctl
+  kickstart -k gui/$(id -u)/com.opencode-tts.notify-watch` if banners stop
+  triggering speech and NotificationCenter is running fine.
+- Untested on real hardware as of 2026-08-20 -- verify it actually fires by
+  triggering a notification and checking
+  `NOTIFY_TTS_DEBUG=1 ~/.local/bin/mac-notify-watch` run by hand in a
+  terminal first, before trusting the launchd agent.
+
 ## Tuning
 
 | Variable | Default | |

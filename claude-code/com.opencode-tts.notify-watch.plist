@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mac-notify-watch: speaks macOS notification banners aloud (any app, incl.
+  Discord) via claude-tts-speak. Needs Accessibility access granted to THIS
+  binary -- System Settings > Privacy & Security > Accessibility -- before it
+  does anything; until then it just waits and retries.
+
+  launchd does no variable expansion; install.sh substitutes @HOME@.
+  Reload after editing the EnvironmentVariables block below:
+    launchctl bootout gui/$(id -u)/com.opencode-tts.notify-watch
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-tts.notify-watch.plist
+  ('launchctl kickstart -k' restarts the process but does NOT pick up a
+  changed EnvironmentVariables block -- bootout+bootstrap does.)
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.opencode-tts.notify-watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HOME@/.local/bin/mac-notify-watch</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>NOTIFY_TTS_VOICE</key><string>hau</string>
+    <!-- Empty = speak every notification banner. Narrow it down once you've
+         heard what's noisy, e.g. only Discord + Messages:
+         <key>NOTIFY_TTS_INCLUDE</key><string>discord,messages</string> -->
+    <!-- <key>NOTIFY_TTS_INCLUDE</key><string></string> -->
+    <!-- <key>NOTIFY_TTS_EXCLUDE</key><string></string> -->
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/mac-notify-watch.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/mac-notify-watch.log</string>
+</dict>
+</plist>
