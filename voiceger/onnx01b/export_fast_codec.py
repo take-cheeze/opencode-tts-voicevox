@@ -243,13 +243,26 @@ print("ALL PARITY CHECKS PASSED", flush=True)
 # ---------------------------------------------------------------------------
 print("=== onnxsim ===", flush=True)
 from simplify_onnx import simplify_and_verify
-simplify_and_verify(onnx_fast, {
+FAST_FEED = {
     "slow_hidden": slow_hidden.numpy(),
     "token_id": np.zeros(1, dtype=np.int64),
     "use_hidden": np.array([True]),
     "position": np.array([0], dtype=np.int64),
     "k": np.zeros(k_st.shape, dtype=np.float32),
-    "v": np.zeros(v_st.shape, dtype=np.float32)})
+    "v": np.zeros(v_st.shape, dtype=np.float32)}
+simplify_and_verify(onnx_fast, FAST_FEED)
 simplify_and_verify(onnx_codec, {"codes": codes1.numpy()})
+
+# ---------------------------------------------------------------------------
+# Weight-only INT8 quantization (fast_step only -- codec_decode is NOT a
+# candidate, see quantize_onnx.py's module docstring for why). Verified
+# 2026-08-20: exact 10/10-step token match on real autoregressive greedy
+# decode, and ~3x *faster* (accuracy_level=4 picks a different CPU kernel
+# path), on top of the ~3.3x size reduction. Reverts to the pre-quantization
+# (but still onnxsim'd) file on any output mismatch.
+# ---------------------------------------------------------------------------
+print("=== weight-only INT8 quantization ===", flush=True)
+from quantize_onnx import quantize_int8_and_verify
+quantize_int8_and_verify(onnx_fast, FAST_FEED)
 
 print("done", flush=True)
