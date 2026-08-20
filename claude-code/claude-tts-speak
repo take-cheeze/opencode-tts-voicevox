@@ -36,6 +36,21 @@ Environment:
                         unset auto-detects one on CLAUDE_TTS_FORWARD_PORT
   CLAUDE_TTS_FORWARD_PORT  loopback port to probe (default 17999)
   CLAUDE_TTS_TOKEN      shared secret, if the receiver requires one
+  CLAUDE_TTS_TRUNCATED_SUFFIX  appended when speakable() actually cuts
+                        something (default " See the full reply for the
+                        rest."); empty disables it
+  CLAUDE_TTS_KEYWORD_LIMIT  keywords from the omitted text named in that
+                        suffix (default 3); 0 disables
+  CLAUDE_TTS_MAC_NATIVE macOS only: 0 to skip mac-translate/mac-summarize
+                        (on-device, tried first) and go straight to the
+                        chain below; on by default
+  CLAUDE_TTS_MAC_TRANSLATE / CLAUDE_TTS_MAC_SUMMARIZE  binary paths
+                        (default ~/.local/bin/mac-translate / mac-summarize,
+                        built by install.sh where a Swift toolchain exists)
+  CLAUDE_TTS_MAC_SOURCE_LANG / CLAUDE_TTS_MAC_TARGET_LANG  languages passed
+                        to mac-translate (default en / ja)
+  CLAUDE_TTS_MAC_TIMEOUT  seconds before giving up on either mac- binary
+                        (default 20)
   CLAUDE_TTS_SUMMARY_URL   comma-separated OpenAI-compatible endpoints, tried in
                         order, so summarizing can be offloaded to a beefier box
                         and still fall back when it is down. Each entry may
@@ -97,7 +112,77 @@ NOTIFY_MAXCHARS = int(os.environ.get("CLAUDE_TTS_NOTIFY_MAXCHARS", "90"))
 SUMMARY_TIMEOUT = float(os.environ.get("CLAUDE_TTS_SUMMARY_TIMEOUT", "90"))
 USER_VOICE = os.environ.get("CLAUDE_TTS_USER_VOICE", "")
 TRANSLATE_TO = os.environ.get("CLAUDE_TTS_TRANSLATE_TO", "Japanese")
+# On-device via Apple's Translation/Foundation Models frameworks (see
+# mac-translate.swift / mac-summarize.swift) -- system-managed models, no
+# API cost and no multi-GB process of our own, so this is tried before every
+# other backend. Needs macOS 26.4+, the target language pack installed
+# (System Settings > General > Language & Region > Translation Languages),
+# and for summarizing, Apple Intelligence enabled (System Settings > Apple
+# Intelligence & Siri). Both binaries fail fast and cleanly when their
+# prerequisite isn't met, so this is safe to leave on by default: a box
+# without either just falls through to the existing chain.
+MAC_NATIVE = sys.platform == "darwin" and os.environ.get("CLAUDE_TTS_MAC_NATIVE") != "0"
+MAC_TRANSLATE_BIN = os.environ.get("CLAUDE_TTS_MAC_TRANSLATE",
+                                   os.path.join(HOME, ".local/bin/mac-translate"))
+MAC_SUMMARIZE_BIN = os.environ.get("CLAUDE_TTS_MAC_SUMMARIZE",
+                                   os.path.join(HOME, ".local/bin/mac-summarize"))
+MAC_SOURCE_LANG = os.environ.get("CLAUDE_TTS_MAC_SOURCE_LANG", "en")
+MAC_TARGET_LANG = os.environ.get("CLAUDE_TTS_MAC_TARGET_LANG", "ja")
+MAC_TIMEOUT = float(os.environ.get("CLAUDE_TTS_MAC_TIMEOUT", "20"))
 PROMPT_MAXCHARS = int(os.environ.get("CLAUDE_TTS_PROMPT_MAXCHARS", "200"))
+# Appended (only when truncation actually happened) so the extractive floor
+# says something instead of just stopping mid-thought -- cheaper than a
+# summarizer call and, per the 2026-08-20 benchmark, no less accurate.
+TRUNCATED_SUFFIX = os.environ.get(
+    "CLAUDE_TTS_TRUNCATED_SUFFIX", " See the full reply for the rest.")
+# How many keywords to pull from the omitted text and name in that suffix --
+# 0 disables the feature (just the plain suffix, as before).
+KEYWORD_LIMIT = int(os.environ.get("CLAUDE_TTS_KEYWORD_LIMIT", "3"))
+
+# Function words worth skipping when picking keywords out of the omitted
+# text -- short and English-only on purpose: the input here is always the
+# pre-translation source text (see speakable()'s call site in text_from_hook),
+# and stripping every function word a general list would is unnecessary for
+# what is, in practice, Claude's own assistant prose.
+STOPWORDS = frozenset("""
+the a an is was were be been being to of and or but if then so because as
+at by for with about against between into through during before after
+above below from up down in out on off over under again further once
+here there when where why how all any both each few more most other some
+such no nor not only own same than too very can will just should now this
+that these those i you he she it we they them their its his her my your
+our what which who whom do does did doing have has had having would could
+also like get gets got one two first second new use used using
+""".split())
+
+
+def extract_keywords(text, exclude, limit):
+    """Distinctive words from `text`, ranked by frequency then length,
+    skipping anything in `exclude` (already spoken) or STOPWORDS.
+
+    CJK has no whitespace to split on -- a real tokenizer is not worth it for
+    a "free" fallback feature, so this only ever looks at the Latin-script
+    identifiers/acronyms that make up most of a technical assistant reply
+    (translation happens after this, on the whole trimmed+suffixed string).
+    """
+    if not text or not limit:
+        return []
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", text)
+    freq = {}
+    first_form = {}
+    order = []
+    for w in words:
+        key = w.lower()
+        first_form.setdefault(key, w)
+        if key in STOPWORDS or key in exclude:
+            continue
+        if key not in freq:
+            order.append(key)
+        freq[key] = freq.get(key, 0) + 1
+    ranked = sorted(order, key=lambda k: (-freq[k], -len(k)))
+    return [first_form[k] for k in ranked[:limit]]
+
+
 def _summary_endpoints():
     """[(url, model)] in preference order, from a comma-separated setting."""
     out = []
@@ -224,9 +309,22 @@ def speakable(text):
     if not text:
         return ""
     chunks = [c for c in SENTENCE_END.split(text) if c and c.strip()]
+    truncated = len(chunks) > SENTENCES
+    omitted = list(chunks[SENTENCES:])
     out = " ".join(chunks[:SENTENCES]).strip()
     if len(out) > MAXCHARS:
-        out = out[:MAXCHARS].rsplit(" ", 1)[0] + "."
+        cut_at = out[:MAXCHARS].rsplit(" ", 1)[0]
+        omitted.insert(0, out[len(cut_at):])
+        out = cut_at + "."
+        truncated = True
+    if truncated and TRUNCATED_SUFFIX:
+        suffix = TRUNCATED_SUFFIX
+        if KEYWORD_LIMIT:
+            spoken = {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", out)}
+            keywords = extract_keywords(" ".join(omitted), spoken, KEYWORD_LIMIT)
+            if keywords:
+                suffix += " Also mentions: " + ", ".join(keywords) + "."
+        out = out.rstrip(".!?。！？") + "." + suffix
     return out
 
 
@@ -515,13 +613,54 @@ def opencode_run(prompt, text):
     return None
 
 
+def summarize_via_macos(text):
+    """mac-summarize: Foundation Models (on-device Apple Intelligence LLM).
+    None if unavailable/not installed/Apple Intelligence is off -- the binary
+    itself distinguishes those in its stderr, logged here for CLAUDE_TTS_DEBUG."""
+    if not MAC_NATIVE or not os.path.isfile(MAC_SUMMARIZE_BIN):
+        return None
+    try:
+        proc = subprocess.run([MAC_SUMMARIZE_BIN], input=text,
+                              capture_output=True, text=True, timeout=MAC_TIMEOUT)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        debug("mac-summarize: %s" % (proc.stderr or "no output").strip())
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        debug("mac-summarize failed (%s)" % exc)
+    return None
+
+
+def translate_via_macos(text):
+    """mac-translate: Translation framework (on-device, system-managed).
+    None if the language pack isn't installed or macOS is too old -- see
+    mac-translate.swift for what triggers each."""
+    if not MAC_NATIVE or not os.path.isfile(MAC_TRANSLATE_BIN):
+        return None
+    try:
+        proc = subprocess.run(
+            [MAC_TRANSLATE_BIN, MAC_SOURCE_LANG, MAC_TARGET_LANG, text],
+            capture_output=True, text=True, timeout=MAC_TIMEOUT)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        debug("mac-translate: %s" % (proc.stderr or "no output").strip())
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        debug("mac-translate failed (%s)" % exc)
+    return None
+
+
 def summarize(text):
     """Reduce a full response to speakable copy.
 
-    Order matters: a self-hosted endpoint first, so nothing leaves the machine.
-    The claude CLI is a real API call and stays opt-in. Extractive truncation is
-    the floor -- a slightly clumsy sentence beats silence, and it needs nothing.
+    Order matters: mac-summarize first where it works -- on-device, no API
+    cost, no multi-GB process. Then a self-hosted endpoint, so nothing leaves
+    the machine. The claude CLI is a real API call and stays opt-in.
+    Extractive truncation is the floor -- a slightly clumsy sentence beats
+    silence, and it needs nothing.
     """
+    out = summarize_via_macos(text)
+    if out:
+        debug("summarized via mac-summarize")
+        return speakable(out)
     for url, model in SUMMARY_ENDPOINTS:
         if not reachable(url):
             debug("summary endpoint %s unreachable, skipping" % url)
@@ -584,6 +723,13 @@ def translate(text):
     """
     if has_cjk(text):
         return text
+    out = translate_via_macos(text)
+    if out and has_cjk(out):
+        debug("translated via mac-translate")
+        return out
+    if out:
+        debug("mac-translate returned non-Japanese output, treating as "
+              "failed: %r" % out)
     for url, model in SUMMARY_ENDPOINTS:
         if not reachable(url):
             debug("translate endpoint %s unreachable, skipping" % url)

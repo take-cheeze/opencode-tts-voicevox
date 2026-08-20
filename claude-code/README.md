@@ -199,6 +199,12 @@ touching `claude-tts-speakd` or your token.
 | `CLAUDE_TTS_USER_VOICE` | unset | which voice speaks your prompts (`--user-prompt`); unset disables it |
 | `CLAUDE_TTS_TRANSLATE_TO` | `Japanese` | `--translate` / `--user-prompt` target language |
 | `CLAUDE_TTS_PROMPT_MAXCHARS` | `200` | cap on how much of a prompt gets spoken |
+| `CLAUDE_TTS_TRUNCATED_SUFFIX` | `" See the full reply for the rest."` | appended when `speakable()` actually cuts something; empty to disable |
+| `CLAUDE_TTS_KEYWORD_LIMIT` | `3` | keywords from the omitted text named in that suffix; `0` disables |
+| `CLAUDE_TTS_MAC_NATIVE` | macOS: on | `0` to skip mac-translate/mac-summarize and go straight to the chain below |
+| `CLAUDE_TTS_MAC_TRANSLATE` / `CLAUDE_TTS_MAC_SUMMARIZE` | `~/.local/bin/mac-translate` / `mac-summarize` | binary paths (built by `install.sh` on macOS with a Swift toolchain) |
+| `CLAUDE_TTS_MAC_SOURCE_LANG` / `CLAUDE_TTS_MAC_TARGET_LANG` | `en` / `ja` | languages passed to mac-translate |
+| `CLAUDE_TTS_MAC_TIMEOUT` | `20` | seconds before giving up on either mac- binary |
 | `CLAUDE_TTS_SUMMARY_URL` | unset | self-hosted OpenAI-compatible endpoint(s) for `--summarize`/`--translate`; see `examples/README.md` |
 | `CLAUDE_TTS_SUMMARY_MODEL` | unset | model for endpoints in `CLAUDE_TTS_SUMMARY_URL` that don't name their own |
 | `CLAUDE_TTS_SUMMARY_CLAUDE` | unset | `1` to fall back to the `claude` CLI -- a real API call, opt-in |

@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "voicevox_core.h"
 
@@ -42,6 +43,12 @@
 // passes the right one, this is just the Linux fallback for a bare compile.
 #ifndef VOICEVOX_LIB_EXT
 #define VOICEVOX_LIB_EXT "so"
+#endif
+
+// Ditto for the asset directory -- the Makefile always passes
+// -DDEFAULT_VOICEVOX_DIR, this is only the fallback for a bare compile.
+#ifndef DEFAULT_VOICEVOX_DIR
+#define DEFAULT_VOICEVOX_DIR "assets/voicevox"
 #endif
 
 typedef void (*json_free_fn)(char*);
@@ -188,7 +195,141 @@ static int set_json_number(char** jsp, const char* field, double v) {
   return 1;
 }
 
+// --build-user-dict <words.tsv> <out.json>: builds a VOICEVOX user
+// dictionary from a flat word list and saves it as JSON, without touching
+// onnxruntime or any voice model. OpenJtalk's own guesses are what usually
+// turn tech jargon and acronyms into letter-by-letter spelling; this is the
+// fix (see voicevox_open_jtalk_rc_use_user_dict() below, which loads the
+// json this produces).
+//
+// TSV columns (tab-separated; blank lines and "#" comments skipped):
+//   surface<TAB>pronunciation<TAB>accent_type[<TAB>word_type[<TAB>priority]]
+//     surface       as it appears in text, e.g. "API"
+//     pronunciation katakana reading, e.g. "エーピーアイ"
+//     accent_type   mora index of the pitch drop (0 = heiban/flat -- a safe
+//                   default when the real accent isn't known)
+//     word_type     PROPER_NOUN (default) | COMMON_NOUN | VERB | ADJECTIVE |
+//                   SUFFIX
+//     priority      0-10, higher wins over OpenJtalk's own guess (default 10)
+static int build_user_dict_mode(const char* core_lib, const char* tsv_path,
+                                const char* json_path) {
+  void* h = dlopen(core_lib, RTLD_NOW | RTLD_LOCAL);
+  if (!h) {
+    fprintf(stderr, "opencode-tts-voicevox: dlopen(%s): %s\n", core_lib,
+            dlerror());
+    return 1;
+  }
+
+  struct VoicevoxUserDict* (*p_new)(void) = NULL;
+  struct VoicevoxUserDictWord (*p_make)(const char*, const char*,
+                                        uintptr_t) = NULL;
+  VoicevoxResultCode (*p_add)(const struct VoicevoxUserDict*,
+                              const struct VoicevoxUserDictWord*,
+                              uint8_t(*)[16]) = NULL;
+  VoicevoxResultCode (*p_save)(const struct VoicevoxUserDict*,
+                               const char*) = NULL;
+  void (*p_delete)(struct VoicevoxUserDict*) = NULL;
+  err_msg_fn p_err = NULL;
+
+#define DNEED(sym, name)                                                    \
+  do {                                                                      \
+    void* _s = dlsym(h, name);                                              \
+    if (!_s) {                                                              \
+      fprintf(stderr, "opencode-tts-voicevox: missing " name "\n");         \
+      return 1;                                                             \
+    }                                                                       \
+    *(void**)&(sym) = _s;                                                   \
+  } while (0)
+
+  DNEED(p_new, "voicevox_user_dict_new");
+  DNEED(p_make, "voicevox_user_dict_word_make");
+  DNEED(p_add, "voicevox_user_dict_add_word");
+  DNEED(p_save, "voicevox_user_dict_save");
+  DNEED(p_delete, "voicevox_user_dict_delete");
+  p_err = (err_msg_fn)dlsym(h, "voicevox_error_result_to_message");
+#undef DNEED
+
+  FILE* fh = fopen(tsv_path, "r");
+  if (!fh) {
+    fprintf(stderr, "opencode-tts-voicevox: cannot open %s\n", tsv_path);
+    return 1;
+  }
+
+  struct VoicevoxUserDict* dict = p_new();
+  char line[1024];
+  int added = 0, skipped = 0;
+  while (fgets(line, sizeof(line), fh)) {
+    char* nl = strpbrk(line, "\r\n");
+    if (nl)
+      *nl = '\0';
+    if (!line[0] || line[0] == '#')
+      continue;
+
+    char* fields[5] = {0};
+    int n = 0;
+    char* save = NULL;
+    for (char* tok = strtok_r(line, "\t", &save); tok && n < 5;
+         tok = strtok_r(NULL, "\t", &save))
+      fields[n++] = tok;
+    if (n < 3) {
+      fprintf(stderr, "opencode-tts-voicevox: skipping malformed line: %s\n",
+              line);
+      skipped++;
+      continue;
+    }
+
+    uintptr_t accent = (uintptr_t)strtoul(fields[2], NULL, 10);
+    struct VoicevoxUserDictWord word = p_make(fields[0], fields[1], accent);
+    if (n >= 4) {
+      if (!strcasecmp(fields[3], "COMMON_NOUN"))
+        word.word_type = VOICEVOX_USER_DICT_WORD_TYPE_COMMON_NOUN;
+      else if (!strcasecmp(fields[3], "VERB"))
+        word.word_type = VOICEVOX_USER_DICT_WORD_TYPE_VERB;
+      else if (!strcasecmp(fields[3], "ADJECTIVE"))
+        word.word_type = VOICEVOX_USER_DICT_WORD_TYPE_ADJECTIVE;
+      else if (!strcasecmp(fields[3], "SUFFIX"))
+        word.word_type = VOICEVOX_USER_DICT_WORD_TYPE_SUFFIX;
+      else
+        word.word_type = VOICEVOX_USER_DICT_WORD_TYPE_PROPER_NOUN;
+    }
+    word.priority = n >= 5 ? (uint8_t)strtoul(fields[4], NULL, 10) : 10;
+
+    uint8_t uuid[16];
+    VoicevoxResultCode rc = p_add(dict, &word, &uuid);
+    if (rc != VOICEVOX_RESULT_OK) {
+      fprintf(stderr, "opencode-tts-voicevox: \"%s\": %s\n", fields[0],
+              p_err ? p_err(rc) : "(no detail)");
+      skipped++;
+      continue;
+    }
+    added++;
+  }
+  fclose(fh);
+
+  VoicevoxResultCode rc = p_save(dict, json_path);
+  p_delete(dict);
+  if (rc != VOICEVOX_RESULT_OK) {
+    fprintf(stderr, "opencode-tts-voicevox: save %s: %s\n", json_path,
+            p_err ? p_err(rc) : "(no detail)");
+    return 1;
+  }
+  printf("opencode-tts-voicevox: wrote %s (%d words, %d skipped)\n",
+         json_path, added, skipped);
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc >= 4 && !strcmp(argv[1], "--build-user-dict")) {
+    const char* dir = getenv("VOICEVOX_DIR");
+    if (!dir || !*dir)
+      dir = file_exists_dir(DEFAULT_VOICEVOX_DIR) ? DEFAULT_VOICEVOX_DIR
+                                                   : "assets/voicevox";
+    char core_lib[4096];
+    snprintf(core_lib, sizeof(core_lib),
+             "%s/core/lib/libvoicevox_core." VOICEVOX_LIB_EXT, dir);
+    return build_user_dict_mode(core_lib, argv[2], argv[3]);
+  }
+
   const char* text = NULL;
   const char* out_path = NULL;
   const char* voice = NULL;
@@ -241,9 +382,6 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-#ifndef DEFAULT_VOICEVOX_DIR
-#define DEFAULT_VOICEVOX_DIR "assets/voicevox"
-#endif
   const char* dir = getenv("VOICEVOX_DIR");
   if (!dir || !*dir)
     dir = DEFAULT_VOICEVOX_DIR;
@@ -328,6 +466,48 @@ int main(int argc, char** argv) {
   snprintf(buf, sizeof(buf), "%s/dict/open_jtalk_dic_utf_8-1.11", dir);
   OpenJtalkRc* oj;
   CHECK(p_oj(buf, &oj), "open jtalk load");
+
+  // Optional: a user dictionary (see --build-user-dict) fixes words OpenJtalk
+  // otherwise mispronounces or spells out letter-by-letter -- tech jargon,
+  // acronyms, anything not in its base dictionary. Soft-fail on any problem
+  // here: synthesis without the extra readings still works, and a stale or
+  // half-written dict file must never take the whole CLI down.
+  const char* user_dict_path = getenv("VOICEVOX_USER_DICT");
+  char user_dict_buf[4096];
+  if (!user_dict_path || !*user_dict_path) {
+    snprintf(user_dict_buf, sizeof(user_dict_buf), "%s/user_dict.json", dir);
+    user_dict_path = user_dict_buf;
+  }
+  FILE* udf = fopen(user_dict_path, "rb");
+  if (udf) {
+    fclose(udf);
+    struct VoicevoxUserDict* (*p_ud_new)(void) = NULL;
+    VoicevoxResultCode (*p_ud_load)(const struct VoicevoxUserDict*,
+                                    const char*) = NULL;
+    VoicevoxResultCode (*p_ud_use)(const struct OpenJtalkRc*,
+                                   const struct VoicevoxUserDict*) = NULL;
+    void* s_new = dlsym(h, "voicevox_user_dict_new");
+    void* s_load = dlsym(h, "voicevox_user_dict_load");
+    void* s_use = dlsym(h, "voicevox_open_jtalk_rc_use_user_dict");
+    if (s_new && s_load && s_use) {
+      *(void**)&p_ud_new = s_new;
+      *(void**)&p_ud_load = s_load;
+      *(void**)&p_ud_use = s_use;
+      struct VoicevoxUserDict* ud = p_ud_new();
+      VoicevoxResultCode rc = p_ud_load(ud, user_dict_path);
+      if (rc == VOICEVOX_RESULT_OK)
+        rc = p_ud_use(oj, ud);
+      if (rc != VOICEVOX_RESULT_OK)
+        fprintf(stderr, "opencode-tts-voicevox: user dict %s: %s\n",
+                user_dict_path, p_err ? p_err(rc) : "(no detail)");
+      // `ud` is intentionally leaked, not deleted: voicevox_open_jtalk_rc_use_user_dict
+      // keeps referring to it, and this process is a one-shot CLI that is
+      // about to exit anyway.
+    } else {
+      fprintf(stderr, "opencode-tts-voicevox: this voicevox_core build has "
+                      "no user-dict support; ignoring %s\n", user_dict_path);
+    }
+  }
 
   VoicevoxInitializeOptions io = p_init_opts();
   io.acceleration_mode = VOICEVOX_ACCELERATION_MODE_CPU;

@@ -78,6 +78,14 @@ fi
 echo "==> building voicevox shim into $BIN"
 make -C "$REPO/voicevox" VOICEVOX_DIR="$VOICEDIR" PREFIX="$PREFIX" install
 
+# Pronunciation fixes for dev jargon (API, README, git, ...) that OpenJtalk's
+# base dictionary does not know and would otherwise spell out letter by
+# letter. Rebuilds every install so editing user_dict_terms.tsv and
+# re-running install.sh is enough to pick up changes.
+echo "==> building VOICEVOX user dictionary (dev jargon pronunciations)"
+"$BIN/opencode-tts-voicevox" --build-user-dict \
+  "$REPO/voicevox/user_dict_terms.tsv" "$VOICEDIR/user_dict.json"
+
 # --- 2. dispatch CLI --------------------------------------------------------
 echo "==> installing opencode-tts-dispatch into $BIN"
 install -m 0755 "$REPO/opencode-tts-dispatch" "$BIN/opencode-tts-dispatch"
@@ -90,6 +98,20 @@ install -m 0755 "$REPO/claude-code/claude-tts-speak" "$BIN/claude-tts-speak"
 # Receiver for sessions running over SSH on another machine. Installed
 # everywhere, but only useful on the box with the speakers.
 install -m 0755 "$REPO/claude-code/claude-tts-speakd" "$BIN/claude-tts-speakd"
+
+# On-device translate/summarize via Apple's Translation/Foundation Models
+# frameworks (macOS only) -- see claude-code/mac-translate.swift and
+# mac-summarize.swift for what each needs (a language pack / Apple
+# Intelligence enabled respectively). claude-tts-speak tries these first and
+# falls back to its existing chain if either prerequisite isn't met, so it's
+# safe to build unconditionally wherever a Swift toolchain exists.
+if [[ "$OS" = macos ]] && command -v swiftc >/dev/null; then
+  echo "==> building mac-translate / mac-summarize into $BIN"
+  swiftc -O "$REPO/claude-code/mac-translate.swift" -o "$BIN/mac-translate"
+  swiftc -O "$REPO/claude-code/mac-summarize.swift" -o "$BIN/mac-summarize"
+elif [[ "$OS" = macos ]]; then
+  echo "WARN: no swiftc found; skipping mac-translate/mac-summarize (install Xcode command line tools to enable)." >&2
+fi
 
 # On macOS, also register claude-tts-speakd as a launchd agent so it is
 # actually listening on 127.0.0.1:17999 -- otherwise remote hosts probe the
