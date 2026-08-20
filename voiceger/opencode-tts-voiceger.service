@@ -1,15 +1,17 @@
 [Unit]
-Description=Voiceger Zundamon TTS server (GPT-SoVITS) for opencode-tts
+Description=Voiceger Zundamon TTS server (Audio8/Raon) for opencode-tts
 After=network.target
 
 [Service]
 Type=simple
 # install.sh rewrites this ExecStart to point at your checkout. The launcher
 # resolves everything else from env + its own location; override with
-# VOICEGER_*_DIR / VOICEGER_PORT / VOICEGER_DEVICE if your layout differs.
+# VOICEGER_*_DIR / VOICEGER_PORT / VOICEGER_DEVICE / VOICEGER_ENGINE if your
+# layout differs.
 ExecStart=%h/dev/opencode-tts-voicevox/voiceger/run-voiceger-server.sh
 Environment=VOICEGER_PORT=18123
 Environment=VOICEGER_DEVICE=cpu
+Environment=VOICEGER_ENGINE=audio8
 Restart=on-failure
 RestartSec=5
 # Cold model load is slow (~1-2 min on CPU); allow it so systemd doesn't

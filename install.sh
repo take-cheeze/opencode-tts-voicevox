@@ -2,7 +2,7 @@
 # Wire opencode-tts to a fully local Zundamon TTS stack:
 #
 #   Japanese / CJK   ->  VOICEVOX CORE C shim      (fast, offline, GPU-free)
-#   English, other   ->  voiceger / GPT-SoVITS     (natural multilingual)
+#   English, other   ->  voiceger / Audio8-TTS     (natural multilingual)
 #
 # The opencode-tts plugin only knows about an `edge_tts` command; we give it
 # `opencode-tts-dispatch`, a lookalike CLI that routes by language.
@@ -12,7 +12,7 @@
 # Usage:
 #   install.sh [--skip-voiceger] [--translate-always]
 #
-#   --skip-voiceger   do not set up the (larger) voiceger GPT-SoVITS stack;
+#   --skip-voiceger   do not set up the (larger) voiceger TTS stack;
 #                     Japanese/CJK still works via the voicevox shim.
 #   --translate-always  same effect as --skip-voiceger, for when this box's
 #                     hooks always translate to Japanese first (e.g. the
@@ -23,6 +23,16 @@
 #                     English/multilingual path would never be exercised.
 #   --clone-src       clone the voiceger_v2 source tree if it is missing
 #                     (forwarded to setup-voiceger.sh).
+#   --with-raon       also install the optional, experimental
+#                     KRAFTON/Raon-OpenTTS-1B engine (English-only, ~16.7GB
+#                     checkpoint, GPU strongly recommended -- forwarded to
+#                     setup-voiceger.sh; select it at runtime with
+#                     VOICEGER_ENGINE=raon).
+#   --with-audio8-onnx  also install the optional Audio8-TTS-Preview-0.6B-
+#                     ONNX-INT4 engine (official quantized build, ~1GB
+#                     runtime footprint vs ~1.4-5GB for the default audio8
+#                     engine -- forwarded to setup-voiceger.sh; select it at
+#                     runtime with VOICEGER_ENGINE=audio8-onnx).
 #
 # Restart opencode afterwards to pick up the plugin config change.
 set -euo pipefail
@@ -36,7 +46,7 @@ SETUP_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --skip-voiceger|--translate-always) SKIP_VOICEGER=1 ;;
-    --clone-src)     SETUP_ARGS+=("$arg") ;;
+    --clone-src|--with-raon|--with-audio8-onnx) SETUP_ARGS+=("$arg") ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done

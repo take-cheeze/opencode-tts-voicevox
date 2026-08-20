@@ -9,7 +9,17 @@ It dispatches by language:
 | Language                | Engine                              | Why |
 |-------------------------|-------------------------------------|-----|
 | **Japanese / CJK**      | VOICEVOX CORE (C shim)              | fast, offline, GPU-free |
-| **English / other**     | [voiceger](https://github.com/zunzun999/voiceger_v2) — GPT-SoVITS Zundamon fine-tune | natural multilingual |
+| **English / other**     | voiceger — [Audio8-TTS-Preview-0.1b](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.1b), zero-shot Zundamon voice clone | small, CPU-viable, multilingual |
+
+voiceger can also run
+[Audio8-TTS-Preview-0.6B-ONNX-INT4](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4)
+(`VOICEGER_ENGINE=audio8-onnx`) — the official quantized build, a larger
+model but a smaller runtime footprint (~1GB vs ~1.4-5GB for the default) and
+Apache-2.0 licensed — or
+[KRAFTON/Raon-OpenTTS-1B](https://huggingface.co/KRAFTON/Raon-OpenTTS-1B)
+(`VOICEGER_ENGINE=raon`) — English-only, a much heavier ~16.7GB checkpoint,
+and GPU-recommended; see [Voiceger (English/other)](#voiceger-englishother)
+below.
 
 The opencode-tts plugin only knows about an `edge_tts` command, so we point
 it at a small `edge-tts` CLI lookalike, `opencode-tts-dispatch`, which looks
@@ -28,7 +38,7 @@ untouched (summary step, slash commands, playback all work as-is).
                 │      CJK router             │            └ VOICEVOX CORE (offline)
                 └──────────────────────────────┘
                                        └─ English/other ─► voiceger server (:18123) ─► Zundamon
-                                                              (GPT-SoVITS, CPU)
+                                                              (Audio8-TTS, CPU)
 ```
 
 ## Layout
@@ -37,7 +47,7 @@ untouched (summary step, slash commands, playback all work as-is).
 |-------------------------|------|
 | `opencode-tts-dispatch` | the `edge_tts` lookalike; routes by CJK detection |
 | `voicevox/`             | C shim (`opencode-tts-voicevox.c`), `Makefile`, `fetch-voicevox.sh` (asset download) |
-| `voiceger/`             | `setup-voiceger.sh` (installs the GPT-SoVITS stack), `tts_server.py` (FastAPI), `run-voiceger-server.sh`, systemd unit + launchd agent, `requirements.txt` |
+| `voiceger/`             | `setup-voiceger.sh` (installs the TTS stack), `tts_server.py` (FastAPI, engines: `audio8` default / `audio8-onnx` opt-in / `raon` opt-in), `run-voiceger-server.sh`, systemd unit + launchd agent, `requirements.txt` |
 | `config/opencode-tts.jsonc.template` | sample plugin config |
 | `install.sh`            | one-shot installer for both backends |
 
@@ -48,9 +58,9 @@ untouched (summary step, slash commands, playback all work as-is).
 | **OS** | Linux (x86_64) or macOS (Apple silicon or Intel) |
 | **Build** | a C compiler — `build-essential` on Linux, Xcode command line tools on macOS |
 | **Runtime** | `ffmpeg` (WAV → MP3), `python3`, and `curl` + `unzip` for the asset download |
-| **voiceger only** | [`uv`](https://docs.astral.sh/uv/), plus `cmake` on macOS (pyopenjtalk builds from source) |
+| **voiceger only** | [`uv`](https://docs.astral.sh/uv/) |
 
-On macOS: `xcode-select --install && brew install ffmpeg cmake uv`.
+On macOS: `xcode-select --install && brew install ffmpeg uv`.
 
 ## Install
 
@@ -64,6 +74,14 @@ cd opencode-tts-voicevox
 ./install.sh --translate-always # same as --skip-voiceger, if this box's
                               # hooks always translate to Japanese first --
                               # voiceger's English path would never run
+# or
+./install.sh --clone-src --with-raon # also install the optional, heavier
+                              # KRAFTON/Raon-OpenTTS-1B engine (English-only,
+                              # ~16.7GB checkpoint, GPU-recommended)
+# or
+./install.sh --clone-src --with-audio8-onnx # also install the official
+                              # Audio8-TTS-Preview-0.6B-ONNX-INT4 build
+                              # (~1GB runtime footprint, Apache-2.0)
 ```
 
 `install.sh` builds the C shim, installs the dispatcher, (optionally) sets up
@@ -87,12 +105,40 @@ on Linux, a launchd user agent on macOS:
   (~90 MiB) for the host platform — `linux-x64`, `osx-arm64`, or `osx-x64`.
 
 ### Voiceger (English/other)
-- `voiceger/setup-voiceger.sh` creates a Python 3.10 venv, installs
-  torch 2.1.2 + deps, downloads the Zundamon fine-tune + GPT-SoVITS
-  pretrained models (~1 GB), and installs the NLTK English tagger.
-  Pass `--clone-src` to fetch the voiceger_v2 tree (~37 MiB) if you do not
-  already have one; point `VOICEGER_SRC` at your checkout otherwise.
-- `voiceger/tts_server.py` is a FastAPI server: `POST /tts`, `GET /ping`.
+- `voiceger/setup-voiceger.sh` creates a Python venv and installs torch +
+  `transformers` + deps. It also needs the voiceger_v2 tree (~37 MiB) purely
+  for its `reference/` Zundamon voice clip + transcript — pass `--clone-src`
+  to fetch it if you do not already have one, or point `VOICEGER_SRC` at your
+  checkout otherwise. Pass `--with-raon` and/or `--with-audio8-onnx` to also
+  install those optional engines.
+- `voiceger/tts_server.py` is a FastAPI server: `POST /tts`, `GET /ping`. It
+  loads one of three engines, chosen by `VOICEGER_ENGINE`:
+  - `audio8` *(default)* — [Audio8-TTS-Preview-0.1b](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.1b),
+    a small (~170M+120M param) multilingual zero-shot voice-cloning model,
+    loaded via plain `transformers` (`trust_remote_code=True`). Its weights
+    download through the normal Hugging Face cache the first time the server
+    starts. CPU-viable, but synthesis peaks at 3.5-5GB RSS (see
+    [Resource usage](#resource-usage)).
+  - `audio8-onnx` — [Audio8-TTS-Preview-0.6B-ONNX-INT4](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4),
+    Audio8's own official quantized build via
+    [github.com/Audio8-AI/Audio8_TTS](https://github.com/Audio8-AI/Audio8_TTS)'s
+    `arktts_runtime` (pure `onnxruntime`, no PyTorch needed — runs fine
+    under this same venv despite the standalone project asking for Python
+    3.11+). Larger model (0.6B vs 0.1b) but a much smaller runtime footprint
+    (~1-2.3GB vs ~1.4-5GB), Apache-2.0 licensed, and 11 languages. Unlike the
+    other two engines it registers a named "voice profile" from
+    `VOICEGER_REF`/`VOICEGER_REF_TEXT` once at startup (`arktts_runtime`'s
+    own model) rather than taking reference audio per request; installed by
+    `setup-voiceger.sh --with-audio8-onnx`, which clones the runtime repo to
+    `VOICEGER_ONNX_SRC` (default `~/dev/Audio8_TTS`) and downloads the model.
+  - `raon` — [Raon-OpenTTS-1B](https://huggingface.co/KRAFTON/Raon-OpenTTS-1B),
+    KRAFTON's F5-TTS-based model. **English-only**, needs its own pip package
+    (installed by `setup-voiceger.sh --with-raon`) plus a ~16.7GB checkpoint,
+    and has not been verified to run at an acceptable speed on CPU — treat it
+    as experimental, for a box with a working GPU.
+  All three clone the same Zundamon reference clip voiceger already ships
+  with, so switching between them is just
+  `VOICEGER_ENGINE=audio8|audio8-onnx|raon`.
 - `voiceger/opencode-tts-voiceger.service` (Linux) and
   `voiceger/com.opencode-tts.voiceger.plist` (macOS) keep the server running;
   `install.sh` bakes your checkout path into whichever one applies.
@@ -127,14 +173,17 @@ Where to set it:
 | anywhere, overriding a hardcoded `--voice` | `VOICEVOX_VOICE=tsumugi` |
 
 Only the Japanese/CJK half has a choice: voiceger speaks English with a single
-Zundamon fine-tune, whatever `--voice` says.
+cloned Zundamon voice, whatever `--voice` says.
 
 ## Resource usage
 
 Measured on an Apple **M4 Mac mini** (10 cores: 4P+6E, 16 GB RAM), all CPU
 paths — nothing here uses the M4's GPU except the optional Ollama
 summarizer. Your numbers will vary with text length, core count, and
-whether a component is cold (first call after startup) or warm.
+whether a component is cold (first call after startup) or warm. The
+`voiceger (audio8)` rows are for the `VOICEGER_ENGINE=audio8` default
+(Audio8-TTS-Preview-0.1b); `voiceger (audio8-onnx)` is the
+`Audio8-TTS-Preview-0.6B-ONNX-INT4` engine; `raon` has not been measured.
 
 | Component | Model | Peak RSS | GPU | Time |
 |---|---|---|---|---|
@@ -142,17 +191,29 @@ whether a component is cold (first call after startup) or warm.
 | | medium (40 chars) | 550 MB | none (CPU) | 1.9 s |
 | | long (~80 chars) | 840 MB | none (CPU) | 2.9 s |
 | audio player (`afplay`, per-invocation) | ~75 CJK chars | 20 MB | none | duration of the clip |
-| `voiceger` (`tts_server.py`, persistent) | idle | 43 MB | none (CPU¹) | — |
-| | warm request, short sentence | 1.4 GB | none (CPU¹) | 2.1 s |
-| | warm request, longer sentence | 1.6 GB | none (CPU¹) | 4.2 s |
+| `voiceger` (`tts_server.py`, `audio8`, persistent) | idle, model loaded | 1.4 GB | none (CPU¹) | — |
+| | warm request, short sentence (~6s audio) | 3.5 GB | none (CPU¹) | 11.1 s |
+| | warm request, longer sentence (~10s audio) | 5.1 GB | none (CPU¹) | 14.0 s |
+| `voiceger` (`tts_server.py`, `audio8-onnx`, persistent) | idle, model loaded | 1.0 GB | none (CPU) | — |
+| | warm request (~8-11s audio) | 2.0-2.3 GB³ | none (CPU) | 5-8 s |
 | Ollama summarizer (`qwen2.5:1.5b`, persistent) | cold (loads into GPU) | 1.1 GB² | 100% | 3.2 s |
 | | warm | 1.1 GB² | 100% | 0.7 s |
 | `claude-tts-speakd` (idle daemon) | — | 6 MB | none | — |
 
 ¹ voiceger defaults to CPU on macOS (`VOICEGER_DEVICE=mps` is opt-in — see
-[Notes & caveats](#notes--caveats)); CPU briefly spikes to 200-240% (2-2.4
-cores) during a request. ² GPU-resident via Metal, from `ollama ps`, not
-counted in the `ollama serve` process's own RSS.
+[Notes & caveats](#notes--caveats)). Synthesis roughly triples RSS over idle
+and grows further with output length — decode-time buffers for the
+autoregressive generation loop (`max_new_tokens=1024`) that PyTorch does not
+release back to the OS between requests, so RSS ratchets up to its
+high-water mark and stays there rather than returning to the idle baseline.
+Budget for the peak (~5 GB seen here), not the idle figure, when sizing a
+box that also runs other things. ² GPU-resident via Metal, from `ollama ps`,
+not counted in the `ollama serve` process's own RSS. ³ Higher than Audio8's
+own published ~1.1-1.2GB synthesis-peak figure for this ONNX build (measured
+on an Apple M2); most likely macOS not reclaiming freed pages between
+requests the same way — the same effect shows up in the `audio8` rows above,
+so it looks like a platform quirk on this box rather than something wrong
+with the model.
 
 The VOICEVOX CLI figure includes fixed per-invocation startup (dlopen,
 ONNX Runtime init, Open JTalk dictionary, model load) — roughly 400 MB and
@@ -173,17 +234,18 @@ memory on this box.
 
 ## Notes & caveats
 
-- **GPU**: on Linux, torch 2.1.2 (cu121) predates Blackwell; an RTX 5050
-  (compute 12.0) falls back to CPU. Set `VOICEGER_DEVICE=cuda` once a
-  compatible torch is installed. On macOS there is no CUDA build at all —
-  setup installs the stock wheels and the service defaults to CPU;
+- **GPU**: `setup-voiceger.sh` installs an unpinned `torch` (cu121 index on
+  Linux, stock wheels on macOS), so whether an RTX 5050 or similar Blackwell
+  card (compute 12.0) gets CUDA support depends on the torch version that
+  resolves at install time — check with `VOICEGER_VENV/bin/python -c
+  "import torch;print(torch.cuda.is_available())"`. Set `VOICEGER_DEVICE=cuda`
+  once it reports `True`. On macOS there is no CUDA build at all — setup
+  installs the stock wheels and the service defaults to CPU;
   `VOICEGER_DEVICE=mps` will try the Apple GPU. CPU inference is
-  slow-but-fine for 2-sentence summaries.
-- **Env isolation**: under direnv/Nix the exported `PYTHONPATH` (Nix Python
-  3.13) leaks into the 3.10 venv and breaks imports. The launchers unset it.
-- **jieba_fast / pyopenjtalk** have no clean cp310 wheels and are handled in
-  `setup-voiceger.sh` (forwarder shim + clean-env build). The pyopenjtalk
-  build compiles C++, so macOS needs the Xcode command line tools and `cmake`.
+  slow-but-fine for 2-sentence summaries with the default `audio8` engine.
+- **Env isolation**: under direnv/Nix the exported `PYTHONPATH` (Nix
+  site-packages for a different Python version) leaks into the venv and
+  breaks imports. The launchers unset it.
 - **Port**: the server listens on **18123**, not the more obvious 8123 —
   that one collides with ClickHouse's HTTP default and, on macOS, with a
   Visual Studio Code plugin helper. A collision is quiet and nasty: the
@@ -199,4 +261,9 @@ memory on this box.
 - **License**: audio must be credited to the character that spoke it —
   **VOICEVOX:ずんだもん**, **VOICEVOX:四国めたん**, and so on. See
   [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html) and each character's own
-  terms; `voicevox/assets/models/TERMS.txt` has the summary.
+  terms; `voicevox/assets/models/TERMS.txt` has the summary. The `audio8` and
+  `raon` engines' weights are **CC-BY-NC-4.0** (non-commercial) —
+  [Audio8-TTS-Preview-0.1b](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.1b)
+  and [Raon-OpenTTS-1B](https://huggingface.co/KRAFTON/Raon-OpenTTS-1B). The
+  `audio8-onnx` engine's weights are **Apache-2.0** —
+  [Audio8-TTS-Preview-0.6B-ONNX-INT4](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4).
