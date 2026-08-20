@@ -1,0 +1,56 @@
+# VOICEVOX user dictionary source for opencode-tts-voicevox / claude-tts-speak.
+#
+# Fixes the "too many alphabets" problem: OpenJtalk's base dictionary does not
+# know most dev jargon, so it falls back to spelling English letters out one
+# at a time instead of reading them as a word. Each line below gives the
+# correct katakana reading; --build-user-dict compiles this into a JSON file
+# voicevox_core loads at startup (see opencode-tts-voicevox.c).
+#
+# Columns (tab-separated -- keep real tabs, not spaces):
+#   surface	pronunciation	accent_type	word_type	priority
+#
+#   surface       exact text as it appears, e.g. "API" (case-sensitive)
+#   pronunciation katakana reading only -- no romaji, no kanji
+#   accent_type   mora index of the pitch drop; 0 (heiban/flat) is a safe
+#                 default and used throughout below rather than guessing
+#                 exact pitch accent for every entry
+#   word_type     PROPER_NOUN | COMMON_NOUN | VERB | ADJECTIVE | SUFFIX
+#   priority      0-10; 10 (used throughout) always wins over OpenJtalk's own
+#                 guess
+#
+# Rebuild after editing:
+#   ./opencode-tts-voicevox --build-user-dict user_dict_terms.tsv assets/user_dict.json
+# install.sh does this automatically.
+#
+# Caution: "PR" is registered as pull request (プルリク), the only sense that
+# comes up in this project's own domain (assistant replies about code). If
+# this dictionary is ever reused somewhere PR could mean public relations,
+# drop or override that line.
+
+API	エーピーアイ	0	PROPER_NOUN	10
+CLI	シーエルアイ	0	PROPER_NOUN	10
+CI	シーアイ	0	PROPER_NOUN	10
+CPU	シーピーユー	0	PROPER_NOUN	10
+GPU	ジーピーユー	0	PROPER_NOUN	10
+RAM	ラム	0	PROPER_NOUN	10
+URL	ユーアールエル	0	PROPER_NOUN	10
+ID	アイディー	0	PROPER_NOUN	10
+SSH	エスエスエイチ	0	PROPER_NOUN	10
+LLM	エルエルエム	0	PROPER_NOUN	10
+TTS	ティーティーエス	0	PROPER_NOUN	10
+JSON	ジェイソン	1	PROPER_NOUN	10
+YAML	ヤムル	0	PROPER_NOUN	10
+CSV	シーエスブイ	0	PROPER_NOUN	10
+TSV	ティーエスブイ	0	PROPER_NOUN	10
+README	リードミー	2	PROPER_NOUN	10
+PR	プルリク	0	PROPER_NOUN	10
+git	ギット	0	PROPER_NOUN	10
+GitHub	ギットハブ	2	PROPER_NOUN	10
+npm	エヌピーエム	0	PROPER_NOUN	10
+Docker	ドッカー	1	PROPER_NOUN	10
+macOS	マックオーエス	0	PROPER_NOUN	10
+commit	コミット	1	COMMON_NOUN	10
+push	プッシュ	1	COMMON_NOUN	10
+pull	プル	1	COMMON_NOUN	10
+merge	マージ	1	COMMON_NOUN	10
+branch	ブランチ	1	COMMON_NOUN	10

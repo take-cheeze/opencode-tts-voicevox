@@ -175,6 +175,26 @@ Where to set it:
 Only the Japanese/CJK half has a choice: voiceger speaks English with a single
 cloned Zundamon voice, whatever `--voice` says.
 
+## Pronunciation dictionary
+
+OpenJtalk's base dictionary does not know most dev jargon (`API`, `README`,
+`git`, ...) and falls back to spelling it out letter by letter. `install.sh`
+fixes the terms listed in `voicevox/user_dict_terms.tsv` by compiling them
+into a VOICEVOX user dictionary (`assets/user_dict.json`), which
+`opencode-tts-voicevox` loads automatically — no flag or env var needed once
+it's built once.
+
+Add a term and re-run, or rebuild by hand:
+
+```sh
+# surface	pronunciation	accent_type	word_type	priority
+echo -e 'Zenn\tゼン\t0\tPROPER_NOUN\t10' >> voicevox/user_dict_terms.tsv
+opencode-tts-voicevox --build-user-dict voicevox/user_dict_terms.tsv "$VOICEVOX_DIR/user_dict.json"
+```
+
+`VOICEVOX_USER_DICT` overrides the dictionary path if you keep it somewhere
+other than `$VOICEVOX_DIR/user_dict.json`.
+
 ## Resource usage
 
 Measured on an Apple **M4 Mac mini** (10 cores: 4P+6E, 16 GB RAM), all CPU

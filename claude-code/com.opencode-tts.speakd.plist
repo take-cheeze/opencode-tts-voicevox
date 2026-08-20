@@ -35,13 +35,20 @@
          CLAUDE_TTS_SUMMARY_MODEL) so nothing leaves the machine; fall back to
          these two and it falls all the way to extractive truncation instead.
          opencode is a real API call through whatever provider it is
-         authenticated with -- real cost, real quota -- opt-in for that
-         reason. shutil.which("opencode") won't find it under launchd's bare
-         PATH, so CLAUDE_TTS_OPENCODE_BIN is pinned explicitly. -->
+         authenticated with -- real cost, real quota. Left off by default
+         (2026-08-20): benchmarking showed dedicated small local models cost
+         2-3.5GB RAM apiece for translation/summarization quality no better
+         than the free extractive floor (speakable()'s first-N-sentences
+         trim, which now appends "see the full reply" when it actually cut
+         something), so there is no tier between "free and good enough" and
+         "several GB and a real API bill" worth paying for here. Re-enable by
+         uncommenting the two keys below if that calculus changes.
+         shutil.which("opencode") won't find it under launchd's bare PATH, so
+         CLAUDE_TTS_OPENCODE_BIN would need to be pinned explicitly. -->
     <!-- <key>CLAUDE_TTS_SUMMARY_URL</key><string>http://127.0.0.1:11434/v1</string> -->
     <!-- <key>CLAUDE_TTS_SUMMARY_MODEL</key><string>qwen2.5:1.5b</string> -->
-    <key>CLAUDE_TTS_SUMMARY_OPENCODE</key><string>1</string>
-    <key>CLAUDE_TTS_OPENCODE_BIN</key><string>@HOME@/.opencode/bin/opencode</string>
+    <!-- <key>CLAUDE_TTS_SUMMARY_OPENCODE</key><string>1</string> -->
+    <!-- <key>CLAUDE_TTS_OPENCODE_BIN</key><string>@HOME@/.opencode/bin/opencode</string> -->
     <!-- <key>CLAUDE_TTS_TOKEN</key><string>REPLACE_ME</string> -->
   </dict>
 
