@@ -75,35 +75,50 @@ except ValueError as exc:
 hooks = settings.setdefault("hooks", {})
 
 
-def has_ours(event):
+def has_ours(event, matcher=None):
     for block in hooks.get(event, []):
+        if matcher is not None and block.get("matcher") != matcher:
+            continue
         for h in block.get("hooks", []):
             if "claude-tts-speak" in h.get("command", ""):
                 return True
     return False
 
 
-def upsert(event, command, timeout, async_=True):
+def upsert(event, command, timeout, async_=True, matcher=None):
     entries = hooks.setdefault(event, [])
-    if has_ours(event):
+    if has_ours(event, matcher):
         if not force:
-            print("setup-hooks: %s already has a claude-tts-speak %s hook, "
-                  "leaving it (--force to replace)" % (target, event))
+            print("setup-hooks: %s already has a claude-tts-speak %s hook%s, "
+                  "leaving it (--force to replace)" % (
+                      target, event,
+                      " (matcher %r)" % matcher if matcher else ""))
             return False
         entries[:] = [
             b for b in entries
-            if not any("claude-tts-speak" in h.get("command", "")
-                       for h in b.get("hooks", []))
+            if not ((matcher is None or b.get("matcher") == matcher)
+                    and any("claude-tts-speak" in h.get("command", "")
+                            for h in b.get("hooks", [])))
         ]
     hook = {"type": "command", "command": command, "timeout": timeout}
     if async_:
         hook["async"] = True  # ignored by Claude Code for UserPromptSubmit
-    entries.append({"hooks": [hook]})
+    block = {"hooks": [hook]}
+    if matcher is not None:
+        block["matcher"] = matcher
+    entries.append(block)
     return True
 
 changed = False
 changed |= upsert("Stop", stop_cmd, 180)
 changed |= upsert("Notification", notify_cmd, 60)
+# Plan-mode approval: PermissionRequest fires immediately (Notification's
+# permission_prompt matcher, if it even covers ExitPlanMode at all -- docs
+# were unclear/contradictory on that when this was added -- only fires after
+# a ~6s wait). Exit 0 with nothing on stdout is a guaranteed no-op for the
+# actual allow/deny decision -- same command as --notify, so this can never
+# grant or deny anything, only alert. Redundant with Notification at worst.
+changed |= upsert("PermissionRequest", notify_cmd, 60, matcher="ExitPlanMode")
 changed |= upsert("UserPromptSubmit", prompt_cmd, 10, async_=False)
 
 if changed:
