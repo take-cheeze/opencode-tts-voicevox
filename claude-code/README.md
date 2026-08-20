@@ -51,7 +51,14 @@ that `settings.json`, rather than overwriting it. Equivalently, by hand:
 `async: true` matters: synthesis takes a few seconds and playback longer, and
 without it every turn would sit there waiting for Zundamon to stop talking.
 
-Review or disable it later with `/hooks`.
+`setup-hooks.sh` also registers a `PermissionRequest` hook matched on
+`ExitPlanMode`, so you get an audio alert the moment a plan is ready for
+review, not just whatever the generic `Notification` hook happens to catch.
+It runs the exact same `--notify` command, always exits without printing
+anything to stdout, and so can never grant or deny the actual permission --
+only alert. Worst case it's a redundant beep alongside `Notification`.
+
+Review or disable any of these later with `/hooks`.
 
 ## Speak what you type
 
