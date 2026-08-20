@@ -65,3 +65,14 @@ python ort_driver.py              # sampled EN+JA synthesis -> wav (torch-free)
   graphs' correctness, but the exporter path is what was verified.
 - Remaining known optimizations, not done: INT4/INT8 quantization, weight
   dedup between the two slow graphs, fp16 codec.
+
+## Post-export: onnxsim
+
+Each export script runs `onnxsim` on its outputs after parity verification
+passes (`simplify_onnx.py`), reverting to the unsimplified graph if the
+simplified one doesn't reproduce the same output on a representative input.
+Measured on `codec_decode.onnx` (2026-08-20): cuts session load time ~34%
+(fewer nodes to parse, 1,339 → 1,132), no measurable effect on inference
+speed or memory -- weights are ~99% of file size and constant-folding
+passes don't touch them. Worth keeping for that load-time win; don't expect
+it to move steady-state synthesis speed or RAM.

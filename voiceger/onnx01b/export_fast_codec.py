@@ -234,4 +234,22 @@ for name, codes, tt in (("T1", codes1, T1), ("T2", codes2, T2)):
     assert got.shape == ref.shape, "codec shape mismatch (dynamism broken?)"
 
 print("ALL PARITY CHECKS PASSED", flush=True)
+
+# ---------------------------------------------------------------------------
+# onnxsim: free cold-start-latency win, no effect on inference speed or
+# memory (weights dominate file size; see simplify_onnx.py). Verified above
+# to reproduce the same output before this ever gets a chance to ship a
+# broken simplification -- reverts to the original file on any mismatch.
+# ---------------------------------------------------------------------------
+print("=== onnxsim ===", flush=True)
+from simplify_onnx import simplify_and_verify
+simplify_and_verify(onnx_fast, {
+    "slow_hidden": slow_hidden.numpy(),
+    "token_id": np.zeros(1, dtype=np.int64),
+    "use_hidden": np.array([True]),
+    "position": np.array([0], dtype=np.int64),
+    "k": np.zeros(k_st.shape, dtype=np.float32),
+    "v": np.zeros(v_st.shape, dtype=np.float32)})
+simplify_and_verify(onnx_codec, {"codes": codes1.numpy()})
+
 print("done", flush=True)

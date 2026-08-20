@@ -384,4 +384,25 @@ if eager_tokens == ort_tokens:
     print("VERIFIED: ONNX pipeline reproduces eager greedy decode exactly.", flush=True)
 else:
     print("TOKEN MISMATCH -- inspect diffs above.", flush=True)
+
+# ---------------------------------------------------------------------------
+# onnxsim: free cold-start-latency win, no effect on inference speed or
+# memory (weights dominate file size; see simplify_onnx.py). Verified above
+# to reproduce the same output before this ever gets a chance to ship a
+# broken simplification -- reverts to the original file on any mismatch.
+# Skipped outright if the export itself didn't verify: nothing sound to
+# simplify.
+# ---------------------------------------------------------------------------
+if eager_tokens == ort_tokens:
+    print("=== onnxsim ===", flush=True)
+    from simplify_onnx import simplify_and_verify
+    simplify_and_verify(onnx_pre, {
+        "input_ids": prompt.numpy(), "attention_mask": prompt_mask.numpy(),
+        "conv": zero_conv.numpy(), "ssm": zero_ssm.numpy()})
+    simplify_and_verify(onnx_dec, {
+        "input_ids": NEXT.numpy(), "cache_position": step_pos.numpy(),
+        "attention_mask": step_mask.numpy(),
+        "conv": CACHE0["conv"].numpy(), "ssm": CACHE0["ssm"].numpy(),
+        "k": CACHE0["k"].numpy(), "v": CACHE0["v"].numpy()})
+
 print("done", flush=True)
