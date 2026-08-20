@@ -45,6 +45,9 @@ TSV	ティーエスブイ	0	PROPER_NOUN	10
 README	リードミー	2	PROPER_NOUN	10
 PR	プルリク	0	PROPER_NOUN	10
 git	ギット	0	PROPER_NOUN	10
+ONNX	オニキス	0	PROPER_NOUN	10
+onnxruntime	オニキスランタイム	0	PROPER_NOUN	10
+ORT	オニキスランタイム	0	PROPER_NOUN	10
 GitHub	ギットハブ	2	PROPER_NOUN	10
 npm	エヌピーエム	0	PROPER_NOUN	10
 Docker	ドッカー	1	PROPER_NOUN	10
@@ -54,3 +57,14 @@ push	プッシュ	1	COMMON_NOUN	10
 pull	プル	1	COMMON_NOUN	10
 merge	マージ	1	COMMON_NOUN	10
 branch	ブランチ	1	COMMON_NOUN	10
+WebGPU	ウェブジーピーユー	0	PROPER_NOUN	10
+PyTorch	パイトーチ	2	PROPER_NOUN	10
+NumPy	ナンパイ	1	PROPER_NOUN	10
+CUDA	クーダ	1	PROPER_NOUN	10
+INT8	インティーエイト	0	PROPER_NOUN	10
+INT4	インティーフォー	0	PROPER_NOUN	10
+fp16	エフピーシックスティーン	0	PROPER_NOUN	10
+fp32	エフピーサーティーツー	0	PROPER_NOUN	10
+MatMul	マットマル	0	PROPER_NOUN	10
+HTTP	エイチティーティーピー	0	PROPER_NOUN	10
+SDK	エスディーケー	0	PROPER_NOUN	10
