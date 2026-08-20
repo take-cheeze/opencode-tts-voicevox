@@ -33,6 +33,13 @@
 #                     runtime footprint vs ~1.4-5GB for the default audio8
 #                     engine -- forwarded to setup-voiceger.sh; select it at
 #                     runtime with VOICEGER_ENGINE=audio8-onnx).
+#   --with-notify-watch  also build and register mac-notify-watch (macOS
+#                     only): speaks any app's notification banners aloud
+#                     (Discord included) by watching NotificationCenter via
+#                     the Accessibility API. Opt-in because it needs you to
+#                     grant Accessibility access to the built binary in
+#                     System Settings > Privacy & Security > Accessibility
+#                     before it does anything -- see claude-code/README.md.
 #
 # Restart opencode afterwards to pick up the plugin config change.
 set -euo pipefail
@@ -42,10 +49,12 @@ PREFIX="${PREFIX:-$HOME/.local}"
 BIN="$PREFIX/bin"
 
 SKIP_VOICEGER=0
+WITH_NOTIFY_WATCH=0
 SETUP_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --skip-voiceger|--translate-always) SKIP_VOICEGER=1 ;;
+    --with-notify-watch) WITH_NOTIFY_WATCH=1 ;;
     --clone-src|--with-raon|--with-audio8-onnx) SETUP_ARGS+=("$arg") ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -111,6 +120,31 @@ if [[ "$OS" = macos ]] && command -v swiftc >/dev/null; then
   swiftc -O "$REPO/claude-code/mac-summarize.swift" -o "$BIN/mac-summarize"
 elif [[ "$OS" = macos ]]; then
   echo "WARN: no swiftc found; skipping mac-translate/mac-summarize (install Xcode command line tools to enable)." >&2
+fi
+
+# mac-notify-watch: speaks macOS notification banners aloud (any app, incl.
+# Discord) by watching NotificationCenter's Accessibility tree. Opt-in --
+# --with-notify-watch -- since it needs an Accessibility permission grant to
+# do anything, unlike the two builds above which just silently no-op.
+if [[ "$OS" = macos && "$WITH_NOTIFY_WATCH" -eq 1 ]]; then
+  if command -v swiftc >/dev/null; then
+    echo "==> building mac-notify-watch into $BIN"
+    swiftc -O "$REPO/claude-code/mac-notify-watch.swift" -o "$BIN/mac-notify-watch"
+
+    echo "==> loading mac-notify-watch launchd agent"
+    agent_dir="$HOME/Library/LaunchAgents"
+    plist="$agent_dir/com.opencode-tts.notify-watch.plist"
+    mkdir -p "$agent_dir" "$HOME/Library/Logs"
+    sed "s|@HOME@|$HOME|g" "$REPO/claude-code/com.opencode-tts.notify-watch.plist" > "$plist"
+    launchctl bootout "gui/$(id -u)/com.opencode-tts.notify-watch" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+
+    echo "    it will sit idle until you grant Accessibility access:"
+    echo "    System Settings > Privacy & Security > Accessibility > add $BIN/mac-notify-watch"
+    echo "    log: ~/Library/Logs/mac-notify-watch.log"
+  else
+    echo "WARN: no swiftc found; skipping mac-notify-watch (install Xcode command line tools to enable)." >&2
+  fi
 fi
 
 # On macOS, also register claude-tts-speakd as a launchd agent so it is
