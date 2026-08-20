@@ -156,9 +156,24 @@ also like get gets got one two first second new use used using
 """.split())
 
 
+def _identifier_score(word):
+    """Higher = more likely a proper noun/acronym/identifier (API, Docker,
+    GitHub) rather than an ordinary long word (specifically, sentence) that
+    just happens to survive the stopword filter. Casing is the cheapest
+    signal available without a real tagger: short ALL-CAPS reads as an
+    acronym, any other capital (leading or embedded, i.e. also catches
+    camelCase) reads as a name -- ordinary words are lowercase."""
+    if word.isupper() and 2 <= len(word) <= 6:
+        return 2
+    if any(c.isupper() for c in word):
+        return 1
+    return 0
+
+
 def extract_keywords(text, exclude, limit):
-    """Distinctive words from `text`, ranked by frequency then length,
-    skipping anything in `exclude` (already spoken) or STOPWORDS.
+    """Distinctive words from `text`, ranked by identifier-likeness (see
+    _identifier_score) then frequency then length, skipping anything in
+    `exclude` (already spoken) or STOPWORDS.
 
     CJK has no whitespace to split on -- a real tokenizer is not worth it for
     a "free" fallback feature, so this only ever looks at the Latin-script
@@ -179,7 +194,8 @@ def extract_keywords(text, exclude, limit):
         if key not in freq:
             order.append(key)
         freq[key] = freq.get(key, 0) + 1
-    ranked = sorted(order, key=lambda k: (-freq[k], -len(k)))
+    ranked = sorted(order, key=lambda k: (
+        -_identifier_score(first_form[k]), -freq[k], -len(k)))
     return [first_form[k] for k in ranked[:limit]]
 
 
