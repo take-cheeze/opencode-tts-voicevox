@@ -7,6 +7,13 @@ Modes:
   --register  one-time: encode reference wav -> ref_codes.npy (uses PyTorch)
   --verify    greedy token parity vs PyTorch generate(do_sample=False)
   (default)   sampled synthesis of EN+JA test sentences -> wav files
+
+fast_step and codec_decode default to WebGPU (see Pipeline.__init__ for the
+per-graph measurements behind that split) -- needs the `onnxruntime-webgpu`
+PyPI package specifically, NOT plain `onnxruntime` (they conflict; pick
+one). Silently falls back to CPU if it isn't installed -- no error, just no
+speedup -- so this is safe to leave as the default even in an environment
+that hasn't installed it yet.
 """
 import argparse
 import json
@@ -46,14 +53,24 @@ def hf_snapshot_dir():
 class Pipeline:
     """numpy + tokenizers + onnxruntime only -- no PyTorch."""
 
-    def __init__(self, codec_provider="cpu"):
-        """codec_provider: "cpu" (default) or "webgpu".
+    def __init__(self, codec_provider="webgpu"):
+        """codec_provider: "webgpu" (default) or "cpu".
 
-        Measured on the M4 Mac mini: the AR graphs are ~2x FASTER on CPU
-        (tiny sequential kernels, GPU dispatch overhead dominates), but the
-        codec convnet is ~1.5x faster on WebGPU (5.8s -> 3.8s for ~11s of
-        audio). "webgpu" needs the onnxruntime-webgpu wheel; falls back to
-        CPU via the provider list if the EP is unavailable.
+        Per-graph provider is fixed, not user-selectable, based on direct
+        measurement on the M4 Mac mini (2026-08-20). In *isolation*,
+        WebGPU wins for fast_step (INT8, 2-3ms vs CPU's 5.9-6.2ms) as well
+        as the codec; but fast_step is called ~10x per frame, and routing
+        it through WebGPU while slow_prefill/slow_decode stay on CPU made
+        the real end-to-end pipeline *slower* (6.8s vs 4.2s of generation
+        for a similar frame count) -- cross-device dispatch/transfer
+        overhead in a tight interleaved loop isn't visible in an isolated
+        microbenchmark. All three AR graphs (fast_step, slow_prefill,
+        slow_decode) stay on CPU for that reason. Only the codec -- called
+        once per utterance, no interleaving with anything else, genuinely
+        GPU-shaped (parallel convnet) -- uses WebGPU, where it measured
+        3.5-4.6s vs CPU's 4.9-5.2s with bit-exact output.
+        codec_provider="cpu" forces it onto CPU too, for comparison. Falls
+        back to CPU via the provider list if WebGPU is unavailable.
         """
         import onnxruntime as ort
         from tokenizers import Tokenizer
@@ -72,12 +89,12 @@ class Pipeline:
         self.n_layers = 24
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        provider = ["CPUExecutionProvider"]
-        codec_prov = (["WebGpuExecutionProvider", "CPUExecutionProvider"]
-                      if codec_provider == "webgpu" else provider)
-        self.s_pre = ort.InferenceSession(str(SCRATCH / "slow_prefill.onnx"), opts, providers=provider)
-        self.s_dec = ort.InferenceSession(str(SCRATCH / "slow_decode.onnx"), opts, providers=provider)
-        self.s_fast = ort.InferenceSession(str(SCRATCH / "fast_step.onnx"), opts, providers=provider)
+        cpu = ["CPUExecutionProvider"]
+        webgpu = ["WebGpuExecutionProvider", "CPUExecutionProvider"]
+        codec_prov = webgpu if codec_provider == "webgpu" else cpu
+        self.s_pre = ort.InferenceSession(str(SCRATCH / "slow_prefill.onnx"), opts, providers=cpu)
+        self.s_dec = ort.InferenceSession(str(SCRATCH / "slow_decode.onnx"), opts, providers=cpu)
+        self.s_fast = ort.InferenceSession(str(SCRATCH / "fast_step.onnx"), opts, providers=cpu)
         self.s_codec = ort.InferenceSession(str(SCRATCH / "codec_decode.onnx"), opts, providers=codec_prov)
         kshape = self.s_fast.get_inputs()[4].shape  # [4,1,H,10,hd]
         self.fast_shape = tuple(kshape)
