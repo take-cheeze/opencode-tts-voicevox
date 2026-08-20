@@ -45,6 +45,17 @@ TSV	ティーエスブイ	0	PROPER_NOUN	10
 README	リードミー	2	PROPER_NOUN	10
 PR	プルリク	0	PROPER_NOUN	10
 git	ギット	0	PROPER_NOUN	10
+claude	クロード	0	PROPER_NOUN	10
+opencode	オープンコード	0	PROPER_NOUN	10
+Anthropic	アンソロピック	0	PROPER_NOUN	10
+Sonnet	ソネット	1	PROPER_NOUN	10
+Opus	オーパス	1	PROPER_NOUN	10
+GPT	ジーピーティー	0	PROPER_NOUN	10
+VOICEVOX	ボイスボックス	0	PROPER_NOUN	10
+Zundamon	ズンダモン	0	PROPER_NOUN	10
+Metan	メタン	0	PROPER_NOUN	10
+Tsumugi	ツムギ	0	PROPER_NOUN	10
+Hau	ハウ	0	PROPER_NOUN	10
 ONNX	オニキス	0	PROPER_NOUN	10
 onnxruntime	オニキスランタイム	0	PROPER_NOUN	10
 ORT	オニキスランタイム	0	PROPER_NOUN	10
