@@ -195,6 +195,34 @@ opencode-tts-voicevox --build-user-dict voicevox/user_dict_terms.tsv "$VOICEVOX_
 `VOICEVOX_USER_DICT` overrides the dictionary path if you keep it somewhere
 other than `$VOICEVOX_DIR/user_dict.json`.
 
+### Collecting new terms automatically
+
+`claude-tts-speakd` (the receiver daemon) watches every CJK message it speaks
+and writes the identifiers it does **not** already recognize -- `LangChain`,
+`RAG`, `Krafton`, ... -- to
+`~/.local/share/opencode-tts-speakd/unknown_words.txt`. It knows what is
+already covered because it reads the compiled dictionary the shim loads, so the
+list stays full of the words Open JTalk would otherwise spell out letter by
+letter and empty of the ones it already gets right.
+
+Import them into `voicevox/user_dict_terms.tsv` with the bundled tool, then fill
+in a kana reading and rebuild (or just `git push` and let the next `install.sh`
+do it):
+
+```sh
+# preview what would be imported, then append each as a pending candidate
+python3 voicevox/import-candidates.py
+python3 voicevox/import-candidates.py --write
+# supply the kana reading for each new line, then rebuild
+python3 voicevox/import-candidates.py --write --build
+```
+
+The tool reads the same dictionary the shim loads, so it only imports words not
+already covered. It prints a suggested kana reading for each word, but those are
+auto-generated and often wrong for multi-syllable proper nouns -- treat them as
+a starting point to correct, never the final reading. Turn collection off with
+`CLAUDE_TTS_COLLECT_UNKNOWN=0`.
+
 ## Resource usage
 
 Measured on an Apple **M4 Mac mini** (10 cores: 4P+6E, 16 GB RAM), all CPU
