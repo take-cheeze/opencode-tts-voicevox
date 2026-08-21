@@ -269,10 +269,32 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencode-tts.notify-
   process id, not "whichever process currently owns the bundle id". `launchctl
   kickstart -k gui/$(id -u)/com.opencode-tts.notify-watch` if banners stop
   triggering speech and NotificationCenter is running fine.
-- Untested on real hardware as of 2026-08-20 -- verify it actually fires by
-  triggering a notification and checking
-  `NOTIFY_TTS_DEBUG=1 ~/.local/bin/mac-notify-watch` run by hand in a
-  terminal first, before trusting the launchd agent.
+- Verified on real hardware 2026-08-21. NotificationCenter's grouped
+  history/list panel fires the same `kAXWindowCreatedNotification` as a
+  fresh banner, with an AX tree that looks identical (`AXWindow` /
+  `AXSystemDialog` either way) -- there is no clean role/subrole
+  distinction to filter on. Two known-noisy shapes are filtered: the
+  literal "No recent notifications" empty-state placeholder, and windows
+  carrying more than one relative-time marker ("2m ago", "3分前", ...),
+  which is what the grouped list looks like when multiple past
+  notifications get swept up together. **Not fully solved**: a single
+  earlier notification that never fired its own window-created event (per
+  the app-grouping behavior above) can still get tacked onto the *next*
+  unrelated notification's capture, since that shape only ever carries one
+  time marker and the genuinely fresh content happens to lead. If banners
+  ever come out obviously stitched together from two unrelated topics,
+  that's this.
+- An app's *first* notification in a session reliably fires a fresh AX
+  event; rapid repeats from the *same* app afterward often don't fire one
+  at all (NotificationCenter appears to update its existing group for that
+  app in place instead) -- confirmed empirically with `terminal-notifier`
+  and `osascript -e 'display notification'`, not documented behavior.
+  Real, distinct apps notifying throughout the day are unaffected; this
+  only bit synthetic same-source test loops.
+- Rebuilding the binary changes its ad-hoc code-signature hash, which
+  invalidates any existing Accessibility grant even though the file path
+  and name are unchanged -- expect to remove and re-add it in System
+  Settings > Privacy & Security > Accessibility after every rebuild.
 
 ## Tuning
 

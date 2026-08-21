@@ -137,12 +137,49 @@ func speak(_ text: String) {
 }
 
 func handleNewWindow(_ window: AXUIElement) {
+    if DEBUG {
+        let role = axString(window, kAXRoleAttribute as String) ?? "?"
+        let subrole = axString(window, kAXSubroleAttribute as String) ?? "?"
+        let desc = axString(window, kAXDescriptionAttribute as String) ?? "?"
+        let identifier = axString(window, "AXIdentifier") ?? "?"
+        debugLog("window created: role=\(role) subrole=\(subrole) description=\(desc) identifier=\(identifier)")
+    }
     var texts: [String] = []
     collectText(window, depth: 0, into: &texts)
     guard !texts.isEmpty else { return }
 
     var deduped: [String] = []
     for t in texts where !deduped.contains(t) { deduped.append(t) }
+
+    // NotificationCenter's own empty-state placeholder for the list panel --
+    // not a real notification, just its "nothing here" copy leaking through
+    // the same AX window-created event as everything else.
+    if deduped == ["No recent notifications"] {
+        debugLog("skipped (NotificationCenter empty-state placeholder)")
+        return
+    }
+
+    // NotificationCenter's grouped history/list panel also fires
+    // kAXWindowCreatedNotification and its AX tree is otherwise
+    // indistinguishable from a single fresh banner -- but it stacks multiple
+    // *different* notifications, each carrying its own relative-time marker
+    // ("2m ago", "1h ago", ...), whereas one genuine banner carries at most
+    // one. Seeing more than one is the cheapest reliable signal that this is
+    // stale list content, not a new notification, without needing a role/
+    // subrole that turned out identical (AXWindow/AXSystemDialog) either way.
+    let relativeTimeMarker = try! NSRegularExpression(
+        pattern: #"\b\d+\s*(s|sec|secs|m|min|mins|h|hr|hrs|d)\b\s*ago\b|[0-9]+\s*(分|時間|秒|日)前"#,
+        options: .caseInsensitive)
+    let timeMarkerCount = deduped.reduce(0) { count, t in
+        count + relativeTimeMarker.numberOfMatches(
+            in: t, range: NSRange(t.startIndex..., in: t))
+    }
+    if timeMarkerCount > 1 {
+        debugLog("skipped (looks like the grouped notification list, "
+                 + "\(timeMarkerCount) relative-time markers): "
+                 + deduped.joined(separator: ": "))
+        return
+    }
 
     let sender = deduped[0].lowercased()
     if EXCLUDE.contains(where: { sender.contains($0) }) {
