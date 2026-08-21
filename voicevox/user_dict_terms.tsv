@@ -49,6 +49,7 @@ GitHub	ギットハブ	2	PROPER_NOUN	10
 GPT	ジーピーティー	0	PROPER_NOUN	10
 GPU	ジーピーユー	0	PROPER_NOUN	10
 Hau	ハウ	0	PROPER_NOUN	10
+homebrew	ホームブリュー	0	PROPER_NOUN	10
 HTTP	エイチティーティーピー	0	PROPER_NOUN	10
 huggingface	ハギングフェイス	0	PROPER_NOUN	10
 ID	アイディー	0	PROPER_NOUN	10
@@ -64,6 +65,7 @@ macOS	マックオーエス	0	PROPER_NOUN	10
 MatMul	マットマル	0	PROPER_NOUN	10
 merge	マージ	1	COMMON_NOUN	10
 Metan	メタン	0	PROPER_NOUN	10
+notifier	ノティファイヤー	1	COMMON_NOUN	10
 npm	エヌピーエム	0	PROPER_NOUN	10
 NumPy	ナンパイ	1	PROPER_NOUN	10
 ONNX	オニキス	0	PROPER_NOUN	10
@@ -83,6 +85,7 @@ README	リードミー	2	PROPER_NOUN	10
 SDK	エスディーケー	0	PROPER_NOUN	10
 Sonnet	ソネット	1	PROPER_NOUN	10
 SSH	エスエスエイチ	0	PROPER_NOUN	10
+terminal	ターミナル	1	COMMON_NOUN	10
 Tsumugi	ツムギ	0	PROPER_NOUN	10
 TSV	ティーエスブイ	0	PROPER_NOUN	10
 TTS	ティーティーエス	0	PROPER_NOUN	10
