@@ -57,6 +57,8 @@ INT8	インティーエイト	0	PROPER_NOUN	10
 JSON	ジェイソン	1	PROPER_NOUN	10
 KRAFTON	クラフトン	0	PROPER_NOUN	10
 launchd	ローンチディー	0	PROPER_NOUN	10
+llama	ラマ	0	PROPER_NOUN	10
+llama.cpp	ラマシーピーピー	0	PROPER_NOUN	10
 LLM	エルエルエム	0	PROPER_NOUN	10
 macOS	マックオーエス	0	PROPER_NOUN	10
 MatMul	マットマル	0	PROPER_NOUN	10
@@ -86,7 +88,9 @@ TSV	ティーエスブイ	0	PROPER_NOUN	10
 TTS	ティーティーエス	0	PROPER_NOUN	10
 URL	ユーアールエル	0	PROPER_NOUN	10
 VOICEVOX	ボイスボックス	0	PROPER_NOUN	10
+VSCode	ブイエスコード	0	PROPER_NOUN	10
 WebGPU	ウェブジーピーユー	0	PROPER_NOUN	10
 webhook	ウェブフック	1	COMMON_NOUN	10
+Xet	ゼット	0	PROPER_NOUN	10
 YAML	ヤムル	0	PROPER_NOUN	10
 Zundamon	ズンダモン	0	PROPER_NOUN	10
