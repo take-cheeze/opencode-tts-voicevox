@@ -82,6 +82,22 @@ Environment:
   CLAUDE_TTS_INHIBIT    1 to make this a no-op -- set on the summarizer child
                         so its own Stop hook cannot start a speak/summarize loop
   CLAUDE_TTS_DEBUG      1 to report why nothing was spoken
+  CLAUDE_TTS_AUTO_DICT  1 (default) to grow the VOICEVOX pronunciation
+                        dictionary on its own: identifier-shaped jargon not
+                        already known gets logged to CLAUDE_TTS_UNKNOWN_WORDS,
+                        and (throttled by CLAUDE_TTS_AUTO_DICT_COOLDOWN)
+                        voicevox/import-candidates.py --auto-apply is run in
+                        the background to guess real katakana readings and
+                        rebuild -- see that script for how it never touches
+                        the hand-curated user_dict_terms.tsv. 0 disables.
+  CLAUDE_TTS_UNKNOWN_WORDS  candidate words file, shared with
+                        claude-tts-speakd (default
+                        ~/.local/share/opencode-tts-speakd/unknown_words.txt)
+  CLAUDE_TTS_AUTO_DICT_COOLDOWN  minimum seconds between auto-dict rebuilds
+                        (default 600)
+  CLAUDE_TTS_AUTO_DICT_SCRIPT  path to import-candidates.py; unset finds it
+                        next to the VOICEVOX_DIR baked into the installed
+                        opencode-tts-voicevox shim
 """
 import json
 import os
@@ -138,6 +154,17 @@ TRUNCATED_SUFFIX = os.environ.get(
 # How many keywords to pull from the omitted text and name in that suffix --
 # 0 disables the feature (just the plain suffix, as before).
 KEYWORD_LIMIT = int(os.environ.get("CLAUDE_TTS_KEYWORD_LIMIT", "3"))
+# Automatic VOICEVOX pronunciation-dictionary growth -- see summarize() /
+# translate()'s katakana prompt hint below for the other half of "no manual
+# dictionary maintenance": that fixes what an LLM step rewrites, this fixes
+# whatever reaches VOICEVOX untouched (e.g. --translate skipped because the
+# text was already CJK).
+AUTO_DICT = os.environ.get("CLAUDE_TTS_AUTO_DICT", "1") != "0"
+UNKNOWN_WORDS = os.environ.get(
+    "CLAUDE_TTS_UNKNOWN_WORDS",
+    os.path.join(HOME, ".local/share/opencode-tts-speakd/unknown_words.txt"))
+AUTO_DICT_COOLDOWN = float(os.environ.get("CLAUDE_TTS_AUTO_DICT_COOLDOWN", "600"))
+AUTO_DICT_STAMP = os.path.join(tempfile.gettempdir(), "claude-tts-auto-dict.stamp")
 
 # Function words worth skipping when picking keywords out of the omitted
 # text -- short and English-only on purpose: the input here is always the
@@ -233,6 +260,23 @@ TRANSLATE_PROMPT = (
     "the translation -- no romanization, no notes, no quotation marks, no "
     "preamble." % TRANSLATE_TO
 )
+# The other half of "no manual pronunciation dictionary": have whichever LLM
+# is already doing the translate/summarize step spell out jargon it would
+# otherwise leave in the Latin alphabet, rather than relying solely on
+# AUTO_DICT catching it downstream (see above). Only makes sense when the
+# spoken target is actually Japanese/VOICEVOX -- TRANSLATE_TO defaults to
+# that, but a deployment that repointed it elsewhere (e.g. for voiceger) gets
+# no benefit from katakana and shouldn't be told to produce it.
+if "japanese" in TRANSLATE_TO.lower():
+    _KATAKANA_HINT = (
+        " Any product names, acronyms, or technical jargon without a common "
+        "Japanese reading should be spelled out in katakana approximating "
+        "its pronunciation, not left in the Latin alphabet or romanized -- "
+        "this is read aloud by a Japanese text-to-speech engine that cannot "
+        "pronounce Latin script."
+    )
+    SUMMARY_PROMPT += _KATAKANA_HINT
+    TRANSLATE_PROMPT += _KATAKANA_HINT
 
 # Terminators for both scripts; CJK stops double as sentence ends.
 SENTENCE_END = re.compile(r"(?<=[.!?。！？])\s+|(?<=[。！？])")
@@ -364,6 +408,93 @@ def stop_previous():
             os.kill(int(fh.read().strip()), 15)
     except (OSError, ValueError):
         pass
+
+
+def _auto_dict_script():
+    """Absolute path to voicevox/import-candidates.py.
+
+    claude-tts-speak is installed standalone into ~/.local/bin, disconnected
+    from the repo checkout the dictionary tooling still lives in -- so this
+    scans the installed opencode-tts-voicevox shim for the VOICEVOX_DIR path
+    baked into it at build time (same trick claude-tts-speakd's
+    _shim_dict_path() uses to find the compiled user_dict.json) and looks for
+    import-candidates.py next to it.
+    """
+    override = os.environ.get("CLAUDE_TTS_AUTO_DICT_SCRIPT")
+    if override:
+        return override
+    shim = shutil.which("opencode-tts-voicevox") or os.path.join(
+        HOME, ".local/bin/opencode-tts-voicevox")
+    try:
+        data = open(shim, "rb").read()
+    except OSError:
+        return None
+    for tok in re.finditer(rb"[\x21-\x7e]{4,}", data):
+        s = tok.group().decode("latin-1")
+        if s.startswith("/") and "voicevox" in s and s.endswith("assets"):
+            candidate = os.path.join(os.path.dirname(s), "import-candidates.py")
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def record_unknown_words(text):
+    """Log CJK-adjacent English/tech identifiers in `text` as dictionary
+    candidates, then (throttled) run import-candidates.py --auto-apply in the
+    background so the pronunciation dictionary grows on its own.
+
+    Mirrors claude-tts-speakd.collect_unknown_words, which does the same for
+    the SSH-forwarding receiver; this covers the far more common local
+    (no forwarding) path, which never goes through that daemon. Runs on the
+    original text, before any translate/summarize rewrites it -- same reason
+    speakd runs it on the raw request body: that is where jargon still sits
+    in easily-matched Latin script.
+
+    Never raises: a failure here must never stop a speak.
+    """
+    if not AUTO_DICT or not text or not has_cjk(text):
+        return
+    existing = set()
+    if os.path.isfile(UNKNOWN_WORDS):
+        try:
+            with open(UNKNOWN_WORDS, encoding="utf-8") as fh:
+                existing = {ln.strip().lower() for ln in fh if ln.strip()}
+        except OSError:
+            pass
+    new, seen = [], set()
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", text):
+        key = word.lower()
+        if key in seen or key in existing:
+            continue
+        seen.add(key)
+        new.append(word)
+    if new:
+        try:
+            os.makedirs(os.path.dirname(UNKNOWN_WORDS) or ".", exist_ok=True)
+            with open(UNKNOWN_WORDS, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(new) + "\n")
+            debug("recorded %d unknown word(s)" % len(new))
+        except OSError as exc:
+            debug("cannot record unknown words: %s" % exc)
+
+    try:
+        due = time.time() - os.path.getmtime(AUTO_DICT_STAMP) >= AUTO_DICT_COOLDOWN
+    except OSError:
+        due = True
+    if not due:
+        return
+    script = _auto_dict_script()
+    if not script:
+        debug("no import-candidates.py found; skipping dictionary auto-refresh")
+        return
+    try:
+        open(AUTO_DICT_STAMP, "w").close()
+        subprocess.Popen([sys.executable, script, "--auto-apply"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        debug("triggered dictionary auto-refresh")
+    except OSError as exc:
+        debug("could not launch dictionary auto-refresh: %s" % exc)
 
 
 def forward_target():
@@ -949,6 +1080,8 @@ def main():
     if not text:
         debug("nothing speakable in the last assistant message")
         return
+
+    record_unknown_words(text)
 
     target = forward_target()
     if target:

@@ -38,12 +38,24 @@ Environment:
   CLAUDE_TTS_COLLECT_UNKNOWN  collect unknown jargon as dictionary
                             candidates (default on; 0 disables)
   CLAUDE_TTS_UNKNOWN_WORDS    candidate words file (see above)
+  CLAUDE_TTS_AUTO_DICT        1 (default) to also run
+                            voicevox/import-candidates.py --auto-apply on
+                            newly-collected words (throttled), so the
+                            dictionary grows on its own; 0 to only log
+                            candidates, as before. See claude-tts-speak's
+                            docstring for the full explanation.
+  CLAUDE_TTS_AUTO_DICT_COOLDOWN  minimum seconds between auto-dict rebuilds
+                            (default 600)
+  CLAUDE_TTS_AUTO_DICT_SCRIPT path to import-candidates.py; unset finds it
+                            next to the VOICEVOX_DIR baked into the
+                            installed opencode-tts-voicevox shim
 """
 import json
 import os
 import re
 import shutil
 import subprocess
+import time
 import unicodedata
 import sys
 import tempfile
@@ -68,6 +80,12 @@ COLLECT_UNKNOWN = os.environ.get("CLAUDE_TTS_COLLECT_UNKNOWN") != "0"
 UNKNOWN_WORDS = os.environ.get(
     "CLAUDE_TTS_UNKNOWN_WORDS",
     os.path.join(HOME, ".local/share/opencode-tts-speakd/unknown_words.txt"))
+# Same auto-dictionary-growth trigger claude-tts-speak runs for the local
+# (no forwarding) path -- see its docstring. Kept in sync here so a
+# forwarding setup (the reason this daemon exists at all) gets it too.
+AUTO_DICT = os.environ.get("CLAUDE_TTS_AUTO_DICT", "1") != "0"
+AUTO_DICT_COOLDOWN = float(os.environ.get("CLAUDE_TTS_AUTO_DICT_COOLDOWN", "600"))
+AUTO_DICT_STAMP = os.path.join(tempfile.gettempdir(), "claude-tts-auto-dict.stamp")
 
 
 def usable_path():
@@ -244,8 +262,57 @@ def unknown_candidates(text):
     return out
 
 
+def _auto_dict_script():
+    """Absolute path to voicevox/import-candidates.py, found next to the
+    VOICEVOX_DIR baked into the installed opencode-tts-voicevox shim -- same
+    scan as _shim_dict_path() above, for a sibling file instead of the
+    compiled dict itself."""
+    override = os.environ.get("CLAUDE_TTS_AUTO_DICT_SCRIPT")
+    if override:
+        return override
+    shim = os.path.join(os.path.dirname(DISPATCH), "opencode-tts-voicevox")
+    if not os.path.isfile(shim):
+        shim = shutil.which("opencode-tts-voicevox")
+    if not shim:
+        shim = os.path.join(HOME, ".local/bin/opencode-tts-voicevox")
+    try:
+        data = open(shim, "rb").read()
+    except OSError:
+        return None
+    for tok in re.finditer(rb"[\x21-\x7e]{4,}", data):
+        s = tok.group().decode("latin-1")
+        if s.startswith("/") and "voicevox" in s and s.endswith("assets"):
+            candidate = os.path.join(os.path.dirname(s), "import-candidates.py")
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def maybe_refresh_dictionary():
+    """Throttled: run import-candidates.py --auto-apply in the background."""
+    if not AUTO_DICT:
+        return
+    try:
+        due = time.time() - os.path.getmtime(AUTO_DICT_STAMP) >= AUTO_DICT_COOLDOWN
+    except OSError:
+        due = True
+    if not due:
+        return
+    script = _auto_dict_script()
+    if not script:
+        return
+    try:
+        open(AUTO_DICT_STAMP, "w").close()
+        subprocess.Popen([sys.executable, script, "--auto-apply"],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
 def collect_unknown_words(text):
-    """Append unknown jargon in `text` to UNKNOWN_WORDS as dictionary candidates.
+    """Append unknown jargon in `text` to UNKNOWN_WORDS as dictionary
+    candidates, then (throttled) trigger a dictionary auto-refresh.
 
     Never raises: a failure here must never stop a speak.
     """
@@ -262,20 +329,20 @@ def collect_unknown_words(text):
     for word in unknown_candidates(text):
         if word.lower() not in existing:
             new.append(word)
-    if not new:
-        return
-    try:
-        os.makedirs(os.path.dirname(UNKNOWN_WORDS) or ".", exist_ok=True)
-        with open(UNKNOWN_WORDS, "a", encoding="utf-8") as fh:
-            for word in new:
-                fh.write(word + "\n")
-        sys.stderr.write("claude-tts-speakd: recorded %d unknown word(s) "
-                         "for the dictionary at %s\n" % (len(new), UNKNOWN_WORDS))
-        sys.stderr.flush()
-    except OSError as exc:
-        sys.stderr.write("claude-tts-speakd: cannot write unknown words %s: "
-                         "%s\n" % (exc, UNKNOWN_WORDS))
-        sys.stderr.flush()
+    if new:
+        try:
+            os.makedirs(os.path.dirname(UNKNOWN_WORDS) or ".", exist_ok=True)
+            with open(UNKNOWN_WORDS, "a", encoding="utf-8") as fh:
+                for word in new:
+                    fh.write(word + "\n")
+            sys.stderr.write("claude-tts-speakd: recorded %d unknown word(s) "
+                             "for the dictionary at %s\n" % (len(new), UNKNOWN_WORDS))
+            sys.stderr.flush()
+        except OSError as exc:
+            sys.stderr.write("claude-tts-speakd: cannot write unknown words %s: "
+                             "%s\n" % (exc, UNKNOWN_WORDS))
+            sys.stderr.flush()
+    maybe_refresh_dictionary()
 
 
 class Handler(BaseHTTPRequestHandler):

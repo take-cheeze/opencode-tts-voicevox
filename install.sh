@@ -90,10 +90,15 @@ make -C "$REPO/voicevox" VOICEVOX_DIR="$VOICEDIR" PREFIX="$PREFIX" install
 # Pronunciation fixes for dev jargon (API, README, git, ...) that OpenJtalk's
 # base dictionary does not know and would otherwise spell out letter by
 # letter. Rebuilds every install so editing user_dict_terms.tsv and
-# re-running install.sh is enough to pick up changes.
+# re-running install.sh is enough to pick up changes. --rebuild-only also
+# merges in ~/.local/share/opencode-tts-speakd/auto_dict_terms.tsv, the
+# dictionary claude-tts-speak grows on its own (see "No manual dictionary
+# maintenance required" in README.md) -- a plain --build-user-dict call here
+# would silently discard everything it had learned.
 echo "==> building VOICEVOX user dictionary (dev jargon pronunciations)"
-"$BIN/opencode-tts-voicevox" --build-user-dict \
-  "$REPO/voicevox/user_dict_terms.tsv" "$VOICEDIR/user_dict.json"
+python3 "$REPO/voicevox/import-candidates.py" --rebuild-only \
+  -o "$REPO/voicevox/user_dict_terms.tsv" -d "$VOICEDIR/user_dict.json" \
+  --shim "$BIN/opencode-tts-voicevox"
 
 # --- 2. dispatch CLI --------------------------------------------------------
 echo "==> installing opencode-tts-dispatch into $BIN"
