@@ -60,6 +60,11 @@ ONNX	オニキス	0	PROPER_NOUN	10
 onnxruntime	オニキスランタイム	0	PROPER_NOUN	10
 ORT	オニキスランタイム	0	PROPER_NOUN	10
 Discord	ディスコード	0	PROPER_NOUN	10
+huggingface	ハギングフェイス	0	PROPER_NOUN	10
+Qwen	クウェン	0	PROPER_NOUN	10
+Audio8	オーディオエイト	0	PROPER_NOUN	10
+Raon	ラオン	0	PROPER_NOUN	10
+KRAFTON	クラフトン	0	PROPER_NOUN	10
 webhook	ウェブフック	1	COMMON_NOUN	10
 bot	ボット	1	COMMON_NOUN	10
 DM	ディーエム	0	PROPER_NOUN	10
