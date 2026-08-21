@@ -56,6 +56,7 @@ INT4	インティーフォー	0	PROPER_NOUN	10
 INT8	インティーエイト	0	PROPER_NOUN	10
 JSON	ジェイソン	1	PROPER_NOUN	10
 KRAFTON	クラフトン	0	PROPER_NOUN	10
+Kubernetes	クバネティス	0	PROPER_NOUN	10
 launchd	ローンチディー	0	PROPER_NOUN	10
 llama	ラマ	0	PROPER_NOUN	10
 llama.cpp	ラマシーピーピー	0	PROPER_NOUN	10
@@ -80,6 +81,8 @@ Qwen	クウェン	0	PROPER_NOUN	10
 RAM	ラム	0	PROPER_NOUN	10
 Raon	ラオン	0	PROPER_NOUN	10
 README	リードミー	2	PROPER_NOUN	10
+Redis	レディス	0	PROPER_NOUN	10
+remote	リモート	1	COMMON_NOUN	10
 SDK	エスディーケー	0	PROPER_NOUN	10
 Sonnet	ソネット	1	PROPER_NOUN	10
 SSH	エスエスエイチ	0	PROPER_NOUN	10
