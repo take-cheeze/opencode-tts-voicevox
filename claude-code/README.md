@@ -102,6 +102,18 @@ here:    claude-tts-speakd ◄────────────────�
               └─► claude-tts-speak --text … ─► dispatcher ─► speakers
 ```
 
+**Quickstart:** `register-tts-host.sh` does all three steps below in one shot
+— starts `claude-tts-speakd` here, adds/updates the `Host` block in
+`~/.ssh/config`, and installs `claude-tts-speak` + hooks on the remote:
+
+```sh
+claude-code/register-tts-host.sh --register remote            # open, single-user
+claude-code/register-tts-host.sh --register remote --token     # shared host: adds a token at both ends
+```
+
+It's idempotent — safe to re-run after changing `--port` or adding `--token`
+later. See `--help` for `--local-only` / `--remote-only` / `--no-hook`.
+
 **On this machine**, run the receiver (`install.sh` puts it in `~/.local/bin`;
 `com.opencode-tts.speakd.plist` keeps it running):
 
