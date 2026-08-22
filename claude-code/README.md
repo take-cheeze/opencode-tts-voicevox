@@ -139,6 +139,23 @@ Host remote
 scp ~/.local/bin/claude-tts-speak remote:.local/bin/
 ```
 
+Or skip scp entirely: while a tunnel from the remote is up, `claude-tts-speakd`
+serves its own scripts, so the remote can pull them straight through it:
+
+```sh
+# on the remote, with an ssh session holding the RemoteForward open:
+curl -fsSL http://127.0.0.1:17999/claude-tts-speak -o ~/.local/bin/claude-tts-speak \
+  && chmod +x ~/.local/bin/claude-tts-speak
+
+curl -fsSL http://127.0.0.1:17999/install.sh   # full installer, same deal
+```
+
+`/claude-tts-speak` is always servable (the daemon knows its own copy);
+`/install.sh` additionally needs to know where a checkout lives — launch
+`claude-tts-speakd` from one or point `CLAUDE_TTS_SERVE_DIR` at it. These GETs
+never ask for `CLAUDE_TTS_TOKEN`: they hand out code, not secrets, and
+bootstrapping is exactly when no shared secret exists yet.
+
 No configuration needed beyond that — the hook probes `127.0.0.1:17999` and
 forwards when something answers, so the same `settings.json` works on both
 ends. Set `CLAUDE_TTS_FORWARD=off` to force local synthesis, or point

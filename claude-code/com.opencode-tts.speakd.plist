@@ -49,6 +49,10 @@
     <!-- <key>CLAUDE_TTS_SUMMARY_MODEL</key><string>qwen2.5:1.5b</string> -->
     <!-- <key>CLAUDE_TTS_SUMMARY_OPENCODE</key><string>1</string> -->
     <!-- <key>CLAUDE_TTS_OPENCODE_BIN</key><string>@HOME@/.opencode/bin/opencode</string> -->
+    <!-- Where GET /install.sh and /claude-tts-speak look for the scripts they
+         serve; only needed when this daemon is not launched from a checkout
+         (the installed copy in ~/.local/bin infers nothing for install.sh). -->
+    <!-- <key>CLAUDE_TTS_SERVE_DIR</key><string>@HOME@/dev/opencode-tts-voicevox</string> -->
     <!-- <key>CLAUDE_TTS_TOKEN</key><string>REPLACE_ME</string> -->
   </dict>
 
