@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """Import collected unknown words into the VOICEVOX pronunciation dictionary.
 
-claude-tts-speakd writes identifiers it does not recognize to
-~/.local/share/opencode-tts-speakd/unknown_words.txt (one surface word per
-line). This tool moves those into voicevox/user_dict_terms.tsv as *candidates*:
-each new line carries a placeholder pronunciation that Open JTalk will reject
-(so it is safely ignored, never mispronounced) until you replace it with a real
-katakana reading and rebuild. A suggested reading is printed and written as an
-inline comment so you only have to copy it in.
+claude-tts-speak and claude-tts-speakd write identifiers they do not
+recognize to ~/.local/share/opencode-tts-speakd/unknown_words.txt (one
+surface word per line). This tool moves those into the dictionary in one of
+two ways:
 
-    python3 voicevox/import-candidates.py            # preview what would change
-    python3 voicevox/import-candidates.py --write    # append candidates to TSV
-    python3 voicevox/import-candidates.py --write --build   # then rebuild it
+  --write             (manual curation) appends candidates to
+                       voicevox/user_dict_terms.tsv with a placeholder
+                       pronunciation Open JTalk will reject (so it is safely
+                       ignored, never mispronounced) until a human replaces it
+                       with a real katakana reading -- the suggested reading
+                       is only a comment, to copy in after checking it.
+  --auto-apply        (unattended) writes the *real* heuristic reading
+                       straight to --auto-tsv, a separate, non-git-tracked
+                       file, and rebuilds -- this is what claude-tts-speak's
+                       CLAUDE_TTS_AUTO_DICT trigger runs so the dictionary
+                       grows on its own, with nothing to maintain by hand.
+                       Kept apart from user_dict_terms.tsv so an automatic
+                       guess never lands in a file you might hand-edit or
+                       commit; --build always merges both, curated entries
+                       taking precedence over an auto one for the same word.
 
-Then edit each new line's pronunciation column to katakana and rebuild (or run
-./install.sh, which rebuilds on its own).
+    python3 voicevox/import-candidates.py                    # preview
+    python3 voicevox/import-candidates.py --write            # append candidates to TSV
+    python3 voicevox/import-candidates.py --write --build    # then rebuild it
+    python3 voicevox/import-candidates.py --auto-apply       # unattended: guess, write, rebuild
+
+For --write (not --auto-apply), edit each new line's pronunciation column to
+katakana and rebuild (or run ./install.sh, which rebuilds on its own).
 """
 import argparse
 import json
@@ -23,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +45,8 @@ DEFAULT_TSV = os.path.join(HERE, "user_dict_terms.tsv")
 DEFAULT_CANDIDATES = os.path.join(
     os.path.expanduser("~"), ".local/share/opencode-tts-speakd/unknown_words.txt")
 DEFAULT_DICT = os.path.join(HERE, "..", "assets", "user_dict.json")
+DEFAULT_AUTO_TSV = os.path.join(
+    os.path.expanduser("~"), ".local/share/opencode-tts-speakd/auto_dict_terms.tsv")
 TSV_FIELDS = ("surface", "pronunciation", "accent_type", "word_type", "priority")
 # A word typed entirely in caps is read as an acronym, letter by letter, the
 # way API / URL / SSH already sit in the dictionary -- a real word written in
@@ -238,17 +255,47 @@ def main():
                     help="append to the TSV (default: preview only)")
     ap.add_argument("--force", action="store_true",
                     help="import words already present in the dictionary too")
+    ap.add_argument("--auto-apply", action="store_true",
+                    help="unattended mode: write real (not placeholder) "
+                         "heuristic readings to --auto-tsv and rebuild -- "
+                         "implies --write --build")
+    ap.add_argument("--auto-tsv", default=DEFAULT_AUTO_TSV,
+                    help="where --auto-apply writes (default: %(default)s)")
+    ap.add_argument("--rebuild-only", action="store_true",
+                    help="skip reading candidates entirely; just merge --out "
+                         "and --auto-tsv and rebuild --dict. This is what "
+                         "install.sh runs, so re-running it never discards "
+                         "readings --auto-apply already learned")
+    ap.add_argument("--shim", default=None,
+                    help="opencode-tts-voicevox binary to rebuild with "
+                         "(default: found on PATH, then ~/.local/bin)")
     args = ap.parse_args()
+    if args.auto_apply:
+        args.write = True
+        args.build = True
+    if args.rebuild_only:
+        return rebuild([args.out, args.auto_tsv], args.dict, args.shim)
 
     words = read_candidates(args.candidates)
     if not words:
         print("no candidates to import")
         return 0
 
-    known = _read_known(args.out) | _read_known(args.dict)
+    target = args.auto_tsv if args.auto_apply else args.out
+    known = (_read_known(args.out) | _read_known(args.dict)
+             | _read_known(args.auto_tsv))
     pending = [w for w in words
                if (surface(w) not in known or args.force)]
     skipped = [w for w in words if surface(w) in known and not args.force]
+
+    if args.auto_apply:
+        # A word the heuristic romanizer has nothing to say about (e.g. a
+        # bare consonant cluster) is left for a human via --write instead of
+        # guessed badly.
+        unusable = [w for w in pending if not suggest_reading(w)]
+        pending = [w for w in pending if suggest_reading(w)]
+        for w in unusable:
+            print("skip %s (no automatic reading; needs a human)" % w)
 
     for w in pending:
         tag = "ADD " if args.write else "add "
@@ -259,44 +306,92 @@ def main():
     if not pending:
         print("nothing new to import")
     elif not args.write:
-        print("\n(silent; pass --write to update %s)" % args.out)
+        print("\n(silent; pass --write to update %s)" % target)
 
     if args.write and pending:
         try:
-            with open(args.out, "a", encoding="utf-8") as fh:
+            os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+            with open(target, "a", encoding="utf-8") as fh:
                 for w in pending:
-                    # Placeholder pronunciation (non-kana) fails the builder's
-                    # validation, so an unfilled candidate is ignored rather than
-                    # mispronounced. Swap in a real reading before rebuilding.
-                    fh.write("%s\t%s\t0\tPROPER_NOUN\t10"
-                             "  # %s -- replace with a kana reading\n"
-                             % (w, w.lower(), suggest_reading(w)))
+                    if args.auto_apply:
+                        # A real katakana reading straight away -- this file
+                        # is never hand-edited, so there is no placeholder /
+                        # "needs a human" step to protect.
+                        fh.write("%s\t%s\t0\tPROPER_NOUN\t10  # auto\n"
+                                 % (w, suggest_reading(w)))
+                    else:
+                        # Placeholder pronunciation (non-kana) fails the
+                        # builder's validation, so an unfilled candidate is
+                        # ignored rather than mispronounced. Swap in a real
+                        # reading before rebuilding.
+                        fh.write("%s\t%s\t0\tPROPER_NOUN\t10"
+                                 "  # %s -- replace with a kana reading\n"
+                                 % (w, w.lower(), suggest_reading(w)))
             print("\nwrote %d entr%s to %s"
-                  % (len(pending), y(len(pending)), args.out))
+                  % (len(pending), y(len(pending)), target))
         except OSError as exc:
-            print("import-candidates: cannot write %s: %s" % (args.out, exc),
+            print("import-candidates: cannot write %s: %s" % (target, exc),
                   file=sys.stderr)
             return 1
 
     if args.write and args.build:
-        return rebuild(args.out, args.dict)
+        return rebuild([args.out, args.auto_tsv], args.dict, args.shim)
     return 0
 
 
-def rebuild(tsv, dict_json):
-    """Compile the TSV into the user dict, like install.sh does."""
-    shim = shutil.which("opencode-tts-voicevox") or os.path.join(
+def rebuild(tsv_paths, dict_json, shim=None):
+    """Compile one or more TSVs into the user dict, like install.sh does.
+
+    --build-user-dict only takes a single TSV, so multiple files (the
+    hand-curated one plus the auto-generated one) are merged into a temp file
+    first. A surface already added from an earlier path in `tsv_paths` is
+    skipped from any later one, so listing the curated file first means a
+    hand-verified reading always wins over an auto-generated guess for the
+    same word.
+    """
+    if isinstance(tsv_paths, str):
+        tsv_paths = [tsv_paths]
+    shim = shim or shutil.which("opencode-tts-voicevox") or os.path.join(
         os.path.expanduser("~"), ".local/bin/opencode-tts-voicevox")
     if not os.path.isfile(shim):
         print("import-candidates: cannot find opencode-tts-voicevox; "
               "skipping rebuild", file=sys.stderr)
         return 1
+
+    seen = set()
+    merged = []
+    for path in tsv_paths:
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                raw = line.rstrip("\n")
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#") or "\t" not in stripped:
+                    merged.append(raw)
+                    continue
+                s = surface(stripped.split("\t")[0])
+                if s in seen:
+                    continue
+                seen.add(s)
+                merged.append(raw)
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".tsv", prefix="opencode-tts-dict-")
     try:
-        proc = subprocess.run([shim, "--build-user-dict", tsv, dict_json],
-                              capture_output=True, text=True)
-    except OSError as exc:
-        print("import-candidates: rebuild failed (%s)" % exc, file=sys.stderr)
-        return 1
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(merged) + "\n")
+        try:
+            proc = subprocess.run(
+                [shim, "--build-user-dict", tmp_path, dict_json],
+                capture_output=True, text=True)
+        except OSError as exc:
+            print("import-candidates: rebuild failed (%s)" % exc, file=sys.stderr)
+            return 1
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
     # The core lib prints a loud per-word validation ERROR (in Japanese) for
     # each placeholder reading; our own "opencode-tts-voicevox:" line reports
     # the same skip in plain form, so drop the core lib's noise.

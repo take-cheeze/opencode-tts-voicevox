@@ -33,7 +33,11 @@ guard case .available = model.availability else {
 let instructions = """
 Summarize the user's text as spoken audio copy in 2 short sentences. Keep \
 concrete facts, decisions, and next actions. Do not mention that this is a \
-summary. No markdown, no bullets, no preamble, plain text only.
+summary. If the text is Japanese, spell any product names, acronyms, or \
+technical jargon in katakana approximating their pronunciation rather than \
+leaving them in the Latin alphabet -- this is read aloud by a Japanese \
+text-to-speech voice that cannot pronounce Latin script. No markdown, no \
+bullets, no preamble, plain text only.
 """
 
 Task {

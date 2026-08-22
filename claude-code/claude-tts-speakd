@@ -35,16 +35,19 @@ Environment:
   CLAUDE_TTS_SPEAK    speak script path    (default ~/.local/bin/claude-tts-speak)
   CLAUDE_TTS_TOKEN    require this shared secret in X-TTS-Token
   CLAUDE_TTS_MAXBYTES reject bodies larger than this (default 131072)
-  CLAUDE_TTS_COLLECT_UNKNOWN  collect unknown jargon as dictionary
-                            candidates (default on; 0 disables)
-  CLAUDE_TTS_UNKNOWN_WORDS    candidate words file (see above)
+
+Dictionary auto-growth (CLAUDE_TTS_AUTO_DICT, CLAUDE_TTS_UNKNOWN_WORDS, etc.)
+happens entirely inside the claude-tts-speak process this daemon spawns for
+every /speak request -- it, not this daemon, is the only place that ever sees
+the text actually handed to VOICEVOX (post-translate/summarize), which is
+also what unknown-word detection needs to look at. Those variables just need
+to be set wherever claude-tts-speakd itself runs, since child_env() passes
+this process's environment through unchanged; see claude-tts-speak's
+docstring for what each one does.
 """
 import json
 import os
-import re
-import shutil
 import subprocess
-import unicodedata
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,13 +64,6 @@ TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
 # cap has to fit one. Still bounded: this port is reachable by any local user
 # on a shared remote host.
 MAXBYTES = int(os.environ.get("CLAUDE_TTS_MAXBYTES", "131072"))
-# Collect dev jargon Open JTalk does not know (it is not in the compiled user
-# dict) into a plain list the user can review and turn into real dictionary
-# entries. On by default so it just works; set to 0 to never write the file.
-COLLECT_UNKNOWN = os.environ.get("CLAUDE_TTS_COLLECT_UNKNOWN") != "0"
-UNKNOWN_WORDS = os.environ.get(
-    "CLAUDE_TTS_UNKNOWN_WORDS",
-    os.path.join(HOME, ".local/share/opencode-tts-speakd/unknown_words.txt"))
 
 
 def usable_path():
@@ -100,182 +96,6 @@ def child_env(extra=None):
     if extra:
         env.update(extra)
     return env
-
-
-_CJK = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff\uAC00-\uD7AF]")
-_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
-
-
-def has_cjk(text):
-    """True if text carries kana / CJK Han / Hangul -- the signal that the text
-    will be spoken by VOICEVOX, where the pronunciation dictionary applies."""
-    return bool(_CJK.search(text))
-
-
-def _lower(words):
-    return {w.lower() for w in words}
-
-
-def _surface(word):
-    """Canonicalize a dictionary surface for comparison with spoken text.
-
-    A compiled VOICEVOX dict stores surfaces in fullwidth Latin (Open JTalk
-    width-normalizes them on write); the text actually spoken, and the TSV the
-    user edits, use ASCII. NFKC maps the two onto each other so a known word is
-    not mistaken for an unknown one.
-    """
-    return unicodedata.normalize("NFKC", word).strip()
-
-
-def _dict_surface_words(path):
-    """Surface words already in a compiled VOICEVOX dict, whichever form it is.
-
-    Accepts the JSON --build-user-dict emits (a list of {surface, ...} objects)
-    or a raw user_dict_terms.tsv (first column). Used so a word we already know
-    about is never re-recorded as "unknown" on every speak.
-    """
-    try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    except (OSError, UnicodeDecodeError):
-        return set()
-    if path.endswith(".json"):
-        try:
-            data = json.loads(text)
-        except ValueError:
-            return set()
-        # --build-user-dict emits a list of entries; a saved VOICEVOX dictionary
-        # is a dict keyed by UUID with the same entry objects as values.
-        if isinstance(data, dict):
-            data = list(data.values())
-        if isinstance(data, list):
-            return {_surface(e["surface"]) for e in data
-                    if isinstance(e, dict) and e.get("surface")}
-        return set()
-    words = set()
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "\t" not in line:
-            continue
-        words.add(_surface(line.split("\t")[0]))
-    return words
-
-
-_SHIM_WORDS_CACHE = None
-
-
-def _shim_dict_path():
-    """user_dict.json the installed opencode-tts-voicevox shim actually loads.
-
-    The daemon runs under launchd/systemd with no VOICEVOX_DIR, but the shim it
-    spawns has the asset dir baked into its binary at build time; scan for the
-    absolute path that ends in /assets (the VOICEVOX_DIR layout) and read
-    <dir>/user_dict.json from there, so collection dedupes against the real
-    dictionary even with a bare environment.
-    """
-    shim = os.path.join(os.path.dirname(DISPATCH), "opencode-tts-voicevox")
-    if not os.path.isfile(shim):
-        shim = shutil.which("opencode-tts-voicevox")
-    if not shim:
-        shim = os.path.join(HOME, ".local/bin/opencode-tts-voicevox")
-    try:
-        data = open(shim, "rb").read()
-    except OSError:
-        return None
-    for tok in re.finditer(rb"[\x21-\x7e]{4,}", data):
-        s = tok.group().decode("latin-1")
-        if s.startswith("/") and "voicevox" in s and "assets" in s:
-            p = os.path.join(s, "user_dict.json")
-            if os.path.isfile(p):
-                return p
-    return None
-
-
-def known_words():
-    """Words already in the user dict, from (in order) $VOICEVOX_USER_DICT,
-    $VOICEVOX_DIR/user_dict.json, a $CLAUDE_TTS_DICT_TSV, and finally the dict
-    the installed shim itself loads. Memoized: the daemon lives forever and the
-    dictionary does not change under it, so scan the binary at most once.
-    Empty set if nothing is found -- collection still works, it just may repeat
-    a word later."""
-    global _SHIM_WORDS_CACHE
-    if _SHIM_WORDS_CACHE is not None:
-        return _SHIM_WORDS_CACHE
-    paths = []
-    ud = os.environ.get("VOICEVOX_USER_DICT")
-    if ud:
-        paths.append(ud)
-    vdir = os.environ.get("VOICEVOX_DIR")
-    if vdir:
-        paths.append(os.path.join(vdir, "user_dict.json"))
-    tsv = os.environ.get("CLAUDE_TTS_DICT_TSV")
-    if tsv:
-        paths.append(tsv)
-    shim_path = _shim_dict_path()
-    if shim_path:
-        paths.append(shim_path)
-    words = set()
-    for p in paths:
-        if p and os.path.isfile(p):
-            words |= _dict_surface_words(p)
-    _SHIM_WORDS_CACHE = words
-    return words
-
-
-def unknown_candidates(text):
-    """Identifier-like words in `text` that are not in the dict yet.
-
-    CJK-only (the dictionary is a VOICEVOX concern) and identifier-shaped
-    (any capital letter, which is how acronyms and proper nouns read --
-    ordinary lowercase prose words do not qualify), so the list stays full of
-    the dev jargon Open JTalk would otherwise spell out letter by letter.
-    """
-    if not has_cjk(text):
-        return []
-    known_low = _lower(known_words())
-    seen = set()
-    out = []
-    for word in _IDENTIFIER.findall(text):
-        key = word.lower()
-        if key in seen or key in known_low:
-            continue
-        seen.add(key)
-        out.append(word)
-    return out
-
-
-def collect_unknown_words(text):
-    """Append unknown jargon in `text` to UNKNOWN_WORDS as dictionary candidates.
-
-    Never raises: a failure here must never stop a speak.
-    """
-    if not COLLECT_UNKNOWN or not text:
-        return
-    new = []
-    existing = set()
-    if os.path.isfile(UNKNOWN_WORDS):
-        try:
-            with open(UNKNOWN_WORDS, encoding="utf-8") as fh:
-                existing = _lower(ln.strip() for ln in fh if ln.strip())
-        except (OSError, UnicodeDecodeError):
-            existing = set()
-    for word in unknown_candidates(text):
-        if word.lower() not in existing:
-            new.append(word)
-    if not new:
-        return
-    try:
-        os.makedirs(os.path.dirname(UNKNOWN_WORDS) or ".", exist_ok=True)
-        with open(UNKNOWN_WORDS, "a", encoding="utf-8") as fh:
-            for word in new:
-                fh.write(word + "\n")
-        sys.stderr.write("claude-tts-speakd: recorded %d unknown word(s) "
-                         "for the dictionary at %s\n" % (len(new), UNKNOWN_WORDS))
-        sys.stderr.flush()
-    except OSError as exc:
-        sys.stderr.write("claude-tts-speakd: cannot write unknown words %s: "
-                         "%s\n" % (exc, UNKNOWN_WORDS))
-        sys.stderr.flush()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -350,10 +170,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": "bad json"})
         if not text:
             return self._json(400, {"ok": False, "error": "no text"})
-
-        # Record jargon Open JTalk does not know so it can be added to the
-        # user dictionary later; this host is where the dictionary lives.
-        collect_unknown_words(text)
 
         env = child_env()
         if req.get("rate"):

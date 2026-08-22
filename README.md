@@ -184,30 +184,67 @@ into a VOICEVOX user dictionary (`assets/user_dict.json`), which
 `opencode-tts-voicevox` loads automatically — no flag or env var needed once
 it's built once.
 
-Add a term and re-run, or rebuild by hand:
+To fix a mispronunciation by hand, edit `voicevox/user_dict_terms.tsv` and
+rebuild. If the word is already a line there (a typo in a hand-curated
+entry), just correct its pronunciation column in place. If it isn't there
+yet (usually a wrong `--auto-apply` guess in
+`~/.local/share/opencode-tts-speakd/auto_dict_terms.tsv`), add a new line
+for it -- you don't need to touch or remove the wrong auto-generated one,
+a curated entry always wins over an auto one for the same word:
 
 ```sh
 # surface	pronunciation	accent_type	word_type	priority
 echo -e 'Zenn\tゼン\t0\tPROPER_NOUN\t10' >> voicevox/user_dict_terms.tsv
-opencode-tts-voicevox --build-user-dict voicevox/user_dict_terms.tsv "$VOICEVOX_DIR/user_dict.json"
+python3 voicevox/import-candidates.py --rebuild-only \
+  -o voicevox/user_dict_terms.tsv -d "$VOICEVOX_DIR/user_dict.json"
 ```
 
-`VOICEVOX_USER_DICT` overrides the dictionary path if you keep it somewhere
-other than `$VOICEVOX_DIR/user_dict.json`.
+`--rebuild-only` (what `install.sh` also runs) merges in
+`auto_dict_terms.tsv` too, curated entries first -- rebuilding with the
+shim's own `opencode-tts-voicevox --build-user-dict` directly instead would
+work for the curated file alone, but drop any not-yet-curated auto-learned
+entries from the compiled dictionary until the next auto-refresh re-adds
+them. `VOICEVOX_USER_DICT` overrides the dictionary path if you keep it
+somewhere other than `$VOICEVOX_DIR/user_dict.json`.
 
-### Collecting new terms automatically
+### No manual dictionary maintenance required
 
-`claude-tts-speakd` (the receiver daemon) watches every CJK message it speaks
-and writes the identifiers it does **not** already recognize -- `LangChain`,
-`RAG`, `Krafton`, ... -- to
-`~/.local/share/opencode-tts-speakd/unknown_words.txt`. It knows what is
-already covered because it reads the compiled dictionary the shim loads, so the
-list stays full of the words Open JTalk would otherwise spell out letter by
-letter and empty of the ones it already gets right.
+Two things work together so `user_dict_terms.tsv` never *has* to be hand-edited:
 
-Import them into `voicevox/user_dict_terms.tsv` with the bundled tool, then fill
-in a kana reading and rebuild (or just `git push` and let the next `install.sh`
-do it):
+1. **Every text-generation step already in the pipeline is told to spell
+   jargon in katakana.** When `claude-tts-speak` translates or summarizes via
+   an LLM (self-hosted endpoint, `claude`/`opencode` CLI fallback, or
+   `mac-summarize` on-device), the prompt asks it to render unfamiliar
+   product names, acronyms, and technical terms as katakana approximating
+   their pronunciation instead of leaving them in the Latin alphabet. This
+   catches most jargon *before* it ever reaches VOICEVOX/OpenJtalk.
+2. **What still reaches VOICEVOX untranslated is learned automatically.**
+   `claude-tts-speak` scans the *final* text right before speaking it --
+   after translate/summarize have already run, so this is the actual
+   Japanese VOICEVOX receives, not the (usually English) source -- and
+   records any identifier still left in Latin script -- `LangChain`, `RAG`,
+   `Krafton`, ... -- to `~/.local/share/opencode-tts-speakd/unknown_words.txt`.
+   (`claude-tts-speakd`, the SSH-forwarding receiver, spawns this same
+   script for every request rather than detecting jargon itself, since it
+   never sees the translated result -- that only exists inside the spawned
+   process.) A throttled background job then runs
+   `voicevox/import-candidates.py --auto-apply`, which guesses a katakana
+   reading with the same Hepburn-romanization heuristic `import-candidates.py`
+   has always used for its preview suggestions, writes it to
+   `~/.local/share/opencode-tts-speakd/auto_dict_terms.tsv` (never to the
+   hand-curated `user_dict_terms.tsv` above), and rebuilds the compiled
+   dictionary -- so a word mispronounced once is usually fixed by the next
+   time it comes up, with nothing to review or copy in. Disable with
+   `CLAUDE_TTS_AUTO_DICT=0`.
+
+If an auto-generated reading turns out wrong (multi-syllable proper nouns are
+the usual culprit), the fix is the "add a term" step above: a hand-curated
+entry in `user_dict_terms.tsv` always takes precedence over an
+auto-generated one for the same word -- both files are merged on every
+rebuild, curated first.
+
+To curate from the collected candidates by hand instead of relying on
+`--auto-apply`, preview and append them as placeholders for review:
 
 ```sh
 # preview what would be imported, then append each as a pending candidate
@@ -217,11 +254,11 @@ python3 voicevox/import-candidates.py --write
 python3 voicevox/import-candidates.py --write --build
 ```
 
-The tool reads the same dictionary the shim loads, so it only imports words not
-already covered. It prints a suggested kana reading for each word, but those are
-auto-generated and often wrong for multi-syllable proper nouns -- treat them as
-a starting point to correct, never the final reading. Turn collection off with
-`CLAUDE_TTS_COLLECT_UNKNOWN=0`.
+Turn candidate collection and the auto-apply rebuild off entirely with
+`CLAUDE_TTS_AUTO_DICT=0`, set wherever `claude-tts-speak` actually runs
+(when forwarding over SSH, that's the receiver's environment --
+`claude-tts-speakd` passes its own environment through to the
+`claude-tts-speak` process it spawns for every request).
 
 ## Resource usage
 
