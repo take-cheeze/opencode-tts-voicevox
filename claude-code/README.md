@@ -179,6 +179,41 @@ speak. Set the same `CLAUDE_TTS_TOKEN` at both ends; the receiver then answers
 unauthenticated requests with 403. Bodies over `CLAUDE_TTS_MAXBYTES` (8 KiB)
 are rejected outright.
 
+## Over Tailscale (tailnet)
+
+SSH tunnels only exist while a session is connected. For devices that come and
+go on their own schedule — another laptop, an iPad, a phone — put
+`claude-tts-speakd` behind **Tailscale Serve** instead:
+
+```sh
+claude-code/setup-tunnel.sh            # --serve is the default
+```
+
+That gives it a stable `https://<host>.<tailnet>.ts.net` URL reachable from
+any device signed into *your* tailnet, with valid TLS and no router port
+opened. The public internet sees nothing, so no token is required (set one at
+both ends anyway if you share the tailnet with people who shouldn't be able to
+trigger your speakers).
+
+From any other tailnet machine:
+
+```sh
+# plain curl — installs nothing:
+curl -X POST https://<host>.<tailnet>.ts.net/speak \
+  -H 'Content-Type: application/json' -d '{"text":"ずんだもんだよ"}'
+
+# claude-tts-speak hooks on a remote host, no SSH tunnel config needed:
+export CLAUDE_TTS_FORWARD=https://<host>.<tailnet>.ts.net
+
+# opencode-tts-dispatch there (the opencode plugin stays unmodified):
+export TTS_FORWARD=https://<host>.<tailnet>.ts.net
+```
+
+`claude-tts-speakd` keeps listening on loopback — Serve is just a reverse
+proxy in front of it, so `CLAUDE_TTS_BIND`, the port, and everything else stay
+as they were. `claude-code/setup-tunnel.sh --off` tears it down again without
+touching the daemon.
+
 ## Claude Code Web
 
 [Claude Code on the web](https://claude.ai/code) runs your session in
@@ -186,15 +221,17 @@ Anthropic's cloud, not on your machine, so `~/.claude/settings.json` never
 reaches it (only the repo's own `.claude/settings.json`, or org-managed
 settings) and there are no speakers to synthesize to. Same fix as SSH, one
 layer up: instead of tunneling over an SSH session that doesn't exist here,
-expose `claude-tts-speakd` to the public internet via Tailscale Funnel.
+expose `claude-tts-speakd` to the **public internet** via Tailscale Funnel —
+Serve's tailnet-only sibling (see above) is not enough, because Anthropic's
+cloud is no tailnet member.
 
 ```sh
 claude-code/setup-hooks.sh --project   # commit .claude/settings.json
-claude-code/setup-tunnel.sh            # brings up the Funnel, generates
-                                        # CLAUDE_TTS_TOKEN if you don't have
-                                        # one, prints what to paste where
+claude-code/setup-tunnel.sh --funnel   # brings up the Funnel, generates
+                                       # CLAUDE_TTS_TOKEN if you don't have
+                                       # one, prints what to paste where
 claude-code/register-web-env.sh        # (optional) puts that on your
-                                        # clipboard and opens claude.ai/code
+                                       # clipboard and opens claude.ai/code
 ```
 
 Then, in the environment dialog (cloud icon above the message box on
@@ -204,8 +241,8 @@ as **Environment variables**. There is no API for this step — it is a web-UI
 dialog only, which is what `register-web-env.sh` works around by getting the
 exact values onto your clipboard instead of you retyping them.
 
-`claude-code/setup-tunnel.sh --off` tears the Funnel down again without
-touching `claude-tts-speakd` or your token.
+`claude-code/setup-tunnel.sh --off` tears the Funnel (or Serve) down again
+without touching `claude-tts-speakd` or your token.
 
 ## Notification banners (Discord, etc.)
 
