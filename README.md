@@ -184,16 +184,28 @@ into a VOICEVOX user dictionary (`assets/user_dict.json`), which
 `opencode-tts-voicevox` loads automatically — no flag or env var needed once
 it's built once.
 
-Add a term and re-run, or rebuild by hand:
+To fix a mispronunciation by hand, edit `voicevox/user_dict_terms.tsv` and
+rebuild. If the word is already a line there (a typo in a hand-curated
+entry), just correct its pronunciation column in place. If it isn't there
+yet (usually a wrong `--auto-apply` guess in
+`~/.local/share/opencode-tts-speakd/auto_dict_terms.tsv`), add a new line
+for it -- you don't need to touch or remove the wrong auto-generated one,
+a curated entry always wins over an auto one for the same word:
 
 ```sh
 # surface	pronunciation	accent_type	word_type	priority
 echo -e 'Zenn\tゼン\t0\tPROPER_NOUN\t10' >> voicevox/user_dict_terms.tsv
-opencode-tts-voicevox --build-user-dict voicevox/user_dict_terms.tsv "$VOICEVOX_DIR/user_dict.json"
+python3 voicevox/import-candidates.py --rebuild-only \
+  -o voicevox/user_dict_terms.tsv -d "$VOICEVOX_DIR/user_dict.json"
 ```
 
-`VOICEVOX_USER_DICT` overrides the dictionary path if you keep it somewhere
-other than `$VOICEVOX_DIR/user_dict.json`.
+`--rebuild-only` (what `install.sh` also runs) merges in
+`auto_dict_terms.tsv` too, curated entries first -- rebuilding with the
+shim's own `opencode-tts-voicevox --build-user-dict` directly instead would
+work for the curated file alone, but drop any not-yet-curated auto-learned
+entries from the compiled dictionary until the next auto-refresh re-adds
+them. `VOICEVOX_USER_DICT` overrides the dictionary path if you keep it
+somewhere other than `$VOICEVOX_DIR/user_dict.json`.
 
 ### No manual dictionary maintenance required
 
