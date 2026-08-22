@@ -83,15 +83,20 @@ Environment:
                         so its own Stop hook cannot start a speak/summarize loop
   CLAUDE_TTS_DEBUG      1 to report why nothing was spoken
   CLAUDE_TTS_AUTO_DICT  1 (default) to grow the VOICEVOX pronunciation
-                        dictionary on its own: identifier-shaped jargon not
-                        already known gets logged to CLAUDE_TTS_UNKNOWN_WORDS,
-                        and (throttled by CLAUDE_TTS_AUTO_DICT_COOLDOWN)
+                        dictionary on its own: after translate/summarize
+                        (if requested), identifier-shaped jargon still left
+                        in Latin script in the final text -- what actually
+                        reaches VOICEVOX -- gets logged to
+                        CLAUDE_TTS_UNKNOWN_WORDS, and (throttled by
+                        CLAUDE_TTS_AUTO_DICT_COOLDOWN)
                         voicevox/import-candidates.py --auto-apply is run in
                         the background to guess real katakana readings and
                         rebuild -- see that script for how it never touches
-                        the hand-curated user_dict_terms.tsv. 0 disables.
-  CLAUDE_TTS_UNKNOWN_WORDS  candidate words file, shared with
-                        claude-tts-speakd (default
+                        the hand-curated user_dict_terms.tsv. Also covers
+                        text forwarded from claude-tts-speakd, which spawns
+                        this script rather than detecting jargon itself.
+                        0 disables.
+  CLAUDE_TTS_UNKNOWN_WORDS  candidate words file (default
                         ~/.local/share/opencode-tts-speakd/unknown_words.txt)
   CLAUDE_TTS_AUTO_DICT_COOLDOWN  minimum seconds between auto-dict rebuilds
                         (default 600)
@@ -156,9 +161,9 @@ TRUNCATED_SUFFIX = os.environ.get(
 KEYWORD_LIMIT = int(os.environ.get("CLAUDE_TTS_KEYWORD_LIMIT", "3"))
 # Automatic VOICEVOX pronunciation-dictionary growth -- see summarize() /
 # translate()'s katakana prompt hint below for the other half of "no manual
-# dictionary maintenance": that fixes what an LLM step rewrites, this fixes
-# whatever reaches VOICEVOX untouched (e.g. --translate skipped because the
-# text was already CJK).
+# dictionary maintenance": that fixes jargon at the LLM-rewrite step, this
+# (record_unknown_words(), called on the final text right before
+# speak_local()) catches whatever still reaches VOICEVOX in Latin script.
 AUTO_DICT = os.environ.get("CLAUDE_TTS_AUTO_DICT", "1") != "0"
 UNKNOWN_WORDS = os.environ.get(
     "CLAUDE_TTS_UNKNOWN_WORDS",
@@ -443,12 +448,22 @@ def record_unknown_words(text):
     candidates, then (throttled) run import-candidates.py --auto-apply in the
     background so the pronunciation dictionary grows on its own.
 
-    Mirrors claude-tts-speakd.collect_unknown_words, which does the same for
-    the SSH-forwarding receiver; this covers the far more common local
-    (no forwarding) path, which never goes through that daemon. Runs on the
-    original text, before any translate/summarize rewrites it -- same reason
-    speakd runs it on the raw request body: that is where jargon still sits
-    in easily-matched Latin script.
+    Called on the *final* text, right before speak_local() -- i.e. after
+    translate()/summarize() have already run, so this scans the actual
+    Japanese VOICEVOX is about to receive, not the (usually English) source.
+    That matters: once a term is rendered in katakana it is not a
+    dictionary problem any more -- katakana is inherently phonetic, so
+    OpenJtalk pronounces it correctly with no dictionary entry needed at
+    all. What still shows up here, in Latin script inside otherwise-Japanese
+    text, is exactly what the translate/summarize step failed to convert
+    (missed the katakana-spelling prompt hint, or translation was never
+    requested/available) and is the only case a dictionary fix actually
+    helps.
+
+    This also covers the SSH-forwarding path without claude-tts-speakd
+    needing its own copy: the receiver spawns this same script as a child
+    process for every /speak request, and that child goes through this same
+    post-translate/summarize point.
 
     Never raises: a failure here must never stop a speak.
     """
@@ -1081,8 +1096,6 @@ def main():
         debug("nothing speakable in the last assistant message")
         return
 
-    record_unknown_words(text)
-
     target = forward_target()
     if target:
         # Summarizing and translating both happen at the receiver, so the
@@ -1103,6 +1116,7 @@ def main():
         if not text:
             debug("summary was empty")
             return
+    record_unknown_words(text)
     speak_local(text)
 
 

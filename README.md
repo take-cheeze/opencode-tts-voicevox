@@ -207,11 +207,15 @@ Two things work together so `user_dict_terms.tsv` never *has* to be hand-edited:
    their pronunciation instead of leaving them in the Latin alphabet. This
    catches most jargon *before* it ever reaches VOICEVOX/OpenJtalk.
 2. **What still reaches VOICEVOX untranslated is learned automatically.**
-   Both `claude-tts-speak` (the common local path) and `claude-tts-speakd`
-   (the SSH-forwarding receiver) watch the text they actually speak and
-   record identifiers not already in the dictionary -- `LangChain`, `RAG`,
+   `claude-tts-speak` scans the *final* text right before speaking it --
+   after translate/summarize have already run, so this is the actual
+   Japanese VOICEVOX receives, not the (usually English) source -- and
+   records any identifier still left in Latin script -- `LangChain`, `RAG`,
    `Krafton`, ... -- to `~/.local/share/opencode-tts-speakd/unknown_words.txt`.
-   A throttled background job then runs
+   (`claude-tts-speakd`, the SSH-forwarding receiver, spawns this same
+   script for every request rather than detecting jargon itself, since it
+   never sees the translated result -- that only exists inside the spawned
+   process.) A throttled background job then runs
    `voicevox/import-candidates.py --auto-apply`, which guesses a katakana
    reading with the same Hepburn-romanization heuristic `import-candidates.py`
    has always used for its preview suggestions, writes it to
@@ -238,9 +242,11 @@ python3 voicevox/import-candidates.py --write
 python3 voicevox/import-candidates.py --write --build
 ```
 
-Turn candidate collection off entirely with `CLAUDE_TTS_COLLECT_UNKNOWN=0`
-(`claude-tts-speakd`) / `CLAUDE_TTS_AUTO_DICT=0` (both scripts, also disables
-the auto-apply rebuild).
+Turn candidate collection and the auto-apply rebuild off entirely with
+`CLAUDE_TTS_AUTO_DICT=0`, set wherever `claude-tts-speak` actually runs
+(when forwarding over SSH, that's the receiver's environment --
+`claude-tts-speakd` passes its own environment through to the
+`claude-tts-speak` process it spawns for every request).
 
 ## Resource usage
 
