@@ -342,7 +342,9 @@ memory on this box.
   which is what `ref_text.txt` transcribes). Override with `VOICEGER_REF`.
 - **Remote hosts**: `TTS_FORWARD` makes the dispatcher fetch finished audio
   from a `claude-tts-speakd` instead of synthesizing, so a machine you SSH into
-  needs no models and no ffmpeg. See `claude-code/README.md`.
+  needs no models and no ffmpeg. Devices on your tailnet can post straight to
+  a `claude-tts-speakd` exposed via Tailscale Serve (`claude-code/setup-tunnel.sh`,
+  tailnet-only by default) — see `claude-code/README.md`.
 - **License**: audio must be credited to the character that spoke it —
   **VOICEVOX:ずんだもん**, **VOICEVOX:四国めたん**, and so on. See
   [zunko.jp](https://zunko.jp/con_ongen_kiyaku.html) and each character's own

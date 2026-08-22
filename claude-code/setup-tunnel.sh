@@ -1,35 +1,42 @@
 #!/usr/bin/env bash
-# claude-code/setup-tunnel.sh [--port N] [--off]
+# claude-code/setup-tunnel.sh [--serve|--funnel] [--port N] [--off]
 #
-# Exposes claude-tts-speakd to the public internet via Tailscale Funnel, so
-# a Claude Code Web session -- which runs in Anthropic's cloud, not on your
-# machine -- can reach it and make THIS machine's speakers talk. Run this on
+# Two ways to put claude-tts-speakd behind a stable https://<host>.<tailnet>.
+# ts.net name without opening a router port or owning a domain. Run this on
 # the box that actually runs claude-tts-speakd (see claude-code/README.md).
 #
-# Unlike the existing SSH RemoteForward setup (for a remote CLI session),
-# there is no SSH session here to tunnel over -- Claude Code Web needs a
-# public URL. Funnel gives you a stable https://<host>.<tailnet>.ts.net
-# without opening a port on your router or owning a domain.
+# --serve                  Tailnet-only, and the DEFAULT. Any device signed
+#                          into YOUR tailnet -- another laptop, an iPad, a
+#                          phone -- can POST /speak or /synth and make these
+#                          speakers talk. Nothing is reachable from the
+#                          public internet, so CLAUDE_TTS_TOKEN stays
+#                          optional here.
+# --funnel                 Public internet. For Claude Code Web sessions,
+#                          which run in Anthropic's cloud rather than on a
+#                          tailnet device. Reachable by anyone who knows the
+#                          URL, so CLAUDE_TTS_TOKEN becomes REQUIRED --
+#                          generated if you don't have one exported, printed,
+#                          and never saved by this script.
 #
-# This makes claude-tts-speakd internet-reachable, so it refuses to run
-# without CLAUDE_TTS_TOKEN. Generates one if you don't already have it
-# exported, and always prints it -- copy it to wherever claude-tts-speakd
-# runs (its launchd/systemd unit) AND to the Claude Code Web environment's
-# variables, alongside CLAUDE_TTS_FORWARD.
+# --off tears both serve and funnel back down; it does not touch
+# CLAUDE_TTS_TOKEN or stop claude-tts-speakd.
 #
-# --off tears the funnel down again; it does not touch CLAUDE_TTS_TOKEN or
-# stop claude-tts-speakd.
+# Both modes proxy to the loopback port claude-tts-speakd already listens on;
+# neither changes its CLAUDE_TTS_BIND.
 set -euo pipefail
 
 PORT="${CLAUDE_TTS_PORT:-17999}"
 ACTION=up
+MODE=serve
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; shift ;;
+    --serve) MODE=serve ;;
+    --funnel) MODE=funnel ;;
     --off) ACTION=off ;;
-    -h|--help) echo "usage: $0 [--port N] [--off]" >&2; exit 2 ;;
-    *) echo "usage: $0 [--port N] [--off]" >&2; exit 2 ;;
+    -h|--help) echo "usage: $0 [--serve|--funnel] [--port N] [--off]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--serve|--funnel] [--port N] [--off]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -57,12 +64,15 @@ TS="$(find_tailscale)" || {
 }
 
 if [ "$ACTION" = off ]; then
-  # "funnel reset" clears the whole funnel config, not just this port; that's
-  # fine since setup-tunnel.sh only ever sets up one.
-  "$TS" funnel reset
-  echo "setup-tunnel: funnel disabled. claude-tts-speakd is still running" \
-       "(untouched) and CLAUDE_TTS_TOKEN is still whatever you had set --" \
-       "this only closes the public path to it."
+  # "funnel reset" / "serve reset" clear the whole funnel/serve config, not
+  # just this port; that's fine since setup-tunnel.sh is the only thing
+  # setting either up here. Reset both so a plain '--off' always cleans up,
+  # whichever mode brought it online; each is a no-op when unset.
+  "$TS" funnel reset || true
+  "$TS" serve reset || true
+  echo "setup-tunnel: serve/funnel disabled. claude-tts-speakd is still" \
+       "running (untouched) and CLAUDE_TTS_TOKEN is still whatever you had" \
+       "set -- this only closes the network path to it."
   exit 0
 fi
 
@@ -75,7 +85,7 @@ EOF
   exit 1
 fi
 
-if [ -z "${CLAUDE_TTS_TOKEN:-}" ]; then
+if [ "$MODE" = funnel ] && [ -z "${CLAUDE_TTS_TOKEN:-}" ]; then
   CLAUDE_TTS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
   cat >&2 <<EOF
 setup-tunnel: no CLAUDE_TTS_TOKEN in your environment -- generated one, since
@@ -100,19 +110,54 @@ You need it in two places:
 EOF
 fi
 
-echo "setup-tunnel: enabling funnel for 127.0.0.1:$PORT ..."
-"$TS" funnel --bg "$PORT"
+if [ "$MODE" = serve ]; then
+  echo "setup-tunnel: enabling tailnet-only serve for 127.0.0.1:$PORT ..."
+  if ! "$TS" serve --bg "$PORT"; then
+    echo "setup-tunnel: 'tailscale serve' failed. If it mentions HTTPS," >&2
+    echo "  enable it once in the admin console:" >&2
+    echo "  https://login.tailscale.com/admin/dns -> HTTPS -> Enable" >&2
+    exit 1
+  fi
+  URL="$("$TS" serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)"
+else
+  echo "setup-tunnel: enabling funnel for 127.0.0.1:$PORT ..."
+  "$TS" funnel --bg "$PORT"
 
-URL="$("$TS" funnel status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)"
+  URL="$("$TS" funnel status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1)"
+fi
 if [ -z "$URL" ]; then
-  echo "setup-tunnel: funnel enabled, but couldn't parse the URL -- run" \
-       "'$TS funnel status' yourself." >&2
+  echo "setup-tunnel: $MODE enabled, but couldn't parse the URL -- run" \
+       "'$TS $MODE status' yourself." >&2
   exit 1
 fi
 HOST="${URL#https://}"
 HOST="${HOST%%/*}"
 
-cat <<EOF
+if [ "$MODE" = serve ]; then
+  cat <<EOF
+
+setup-tunnel: done. Tailnet-only URL: $URL
+
+Reachable from any device signed into this tailnet; the public internet
+sees nothing, so no token is needed (set one at both ends anyway if you
+share the tailnet with people who shouldn't trigger your speakers).
+
+From another tailnet machine:
+
+  # plain curl -- works anywhere, installs nothing:
+  curl -s -X POST $URL/speak \\
+    -H 'Content-Type: application/json' -d '{"text":"ずんだもんだよ"}'
+
+  # claude-tts-speak hooks on a remote host (no SSH tunnel config needed):
+  export CLAUDE_TTS_FORWARD=$URL
+
+  # opencode-tts-dispatch there (opencode plugin stays unmodified):
+  export TTS_FORWARD=$URL
+
+'$TS serve status' shows what's exposed; '$0 --off --serve' takes it down.
+EOF
+else
+  cat <<EOF
 
 setup-tunnel: done. Public URL: $URL
 
@@ -133,5 +178,6 @@ project/org hooks, never ~/.claude/settings.json.
 Anyone who can reach this URL and knows the token can make your speakers
 talk; anyone who can reach it WITHOUT the token gets a 403. Run
 '$TS funnel status' any time to check what's exposed, or
-'$0 --off' to take it back down.
+'$0 --off --funnel' to take it back down.
 EOF
+fi

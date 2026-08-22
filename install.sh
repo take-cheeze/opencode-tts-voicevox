@@ -51,6 +51,19 @@ BIN="$PREFIX/bin"
 SKIP_VOICEGER=0
 WITH_NOTIFY_WATCH=0
 SETUP_ARGS=()
+
+# A destination that is already a symlink is being managed elsewhere (e.g. a
+# dotfiles repo linking straight into this checkout via its create_links.sh).
+# Copying over it would silently un-manage it, so leave it and just report.
+install_script() {
+  local src="$1" dst="$2"
+  if [ -L "$dst" ]; then
+    echo "    $dst is a symlink; leaving it as-is (remove it to reinstall)"
+    return
+  fi
+  install -m 0755 "$src" "$dst"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --skip-voiceger|--translate-always) SKIP_VOICEGER=1 ;;
@@ -102,16 +115,16 @@ python3 "$REPO/voicevox/import-candidates.py" --rebuild-only \
 
 # --- 2. dispatch CLI --------------------------------------------------------
 echo "==> installing opencode-tts-dispatch into $BIN"
-install -m 0755 "$REPO/opencode-tts-dispatch" "$BIN/opencode-tts-dispatch"
+install_script "$REPO/opencode-tts-dispatch" "$BIN/opencode-tts-dispatch"
 
 # Claude Code speaks through the same dispatcher, via a Stop hook. Installing
 # the script is enough; registering the hook is a separate, opt-in step
 # (see claude-code/README.md).
 echo "==> installing claude-tts-speak into $BIN"
-install -m 0755 "$REPO/claude-code/claude-tts-speak" "$BIN/claude-tts-speak"
+install_script "$REPO/claude-code/claude-tts-speak" "$BIN/claude-tts-speak"
 # Receiver for sessions running over SSH on another machine. Installed
 # everywhere, but only useful on the box with the speakers.
-install -m 0755 "$REPO/claude-code/claude-tts-speakd" "$BIN/claude-tts-speakd"
+install_script "$REPO/claude-code/claude-tts-speakd" "$BIN/claude-tts-speakd"
 
 # On-device translate/summarize via Apple's Translation/Foundation Models
 # frameworks (macOS only) -- see claude-code/mac-translate.swift and
