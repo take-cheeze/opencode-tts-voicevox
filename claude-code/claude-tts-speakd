@@ -20,6 +20,15 @@ Endpoints:
     POST /speak   {"text":"...", "rate":"+25%", "voice":"...", "summarize":bool,
                    "translate":bool} -> 202 {"ok": true}
     POST /synth   {"text": "...", "rate": "+25%", "voice": "..."} -> 200 audio/mpeg
+    GET  /claude-tts-speak, /install.sh -> the matching script, so a fresh
+                  remote can bootstrap through its RemoteForward tunnel alone,
+                  no scp from this side needed (see README.md "Over SSH").
+                  Candidate sources per route, first existing wins:
+                  CLAUDE_TTS_SERVE_DIR/<name>, then the installed
+                  ~/.local/bin/claude-tts-speak, then next to this daemon
+                  file. Deliberately served without CLAUDE_TTS_TOKEN: they are
+                  code, not secrets, and bootstrapping is exactly when no
+                  shared secret exists yet.
 
 /speak plays here and is what the Claude Code hook uses. /synth hands the
 audio back instead, for callers that do their own playback -- opencode-tts
@@ -33,6 +42,9 @@ Environment:
   CLAUDE_TTS_PORT     listen port          (default 17999)
   CLAUDE_TTS_BIND     listen address       (default 127.0.0.1)
   CLAUDE_TTS_SPEAK    speak script path    (default ~/.local/bin/claude-tts-speak)
+  CLAUDE_TTS_SERVE_DIR repo checkout whose install.sh / claude-tts-speak the
+                      GET routes serve (default: infer from this file's
+                      location; only matters when not running from a checkout)
   CLAUDE_TTS_TOKEN    require this shared secret in X-TTS-Token
   CLAUDE_TTS_MAXBYTES reject bodies larger than this (default 131072)
 
@@ -64,6 +76,25 @@ TOKEN = os.environ.get("CLAUDE_TTS_TOKEN", "")
 # cap has to fit one. Still bounded: this port is reachable by any local user
 # on a shared remote host.
 MAXBYTES = int(os.environ.get("CLAUDE_TTS_MAXBYTES", "131072"))
+
+# --- script serving (GET) ---------------------------------------------------
+# A fresh remote only needs its RemoteForward tunnel to be up to pull these,
+# so it can bootstrap with curl alone (see README.md "Over SSH"). Fixed
+# whitelist of routes -> candidate files, first existing wins; request paths
+# never reach the filesystem directly.
+SERVE_DIR = os.environ.get("CLAUDE_TTS_SERVE_DIR", "")
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCRIPTS = {
+    "/claude-tts-speak": [SPEAK],
+    "/install.sh": [],
+}
+if SERVE_DIR:
+    # Explicit override wins over every inferred location.
+    SCRIPTS["/claude-tts-speak"].insert(0, os.path.join(SERVE_DIR, "claude-tts-speak"))
+    SCRIPTS["/install.sh"].append(os.path.join(SERVE_DIR, "install.sh"))
+# Running straight out of a checkout: both files are within reach of this file.
+SCRIPTS["/install.sh"].append(os.path.join(HERE, os.pardir, "install.sh"))
+SCRIPTS["/claude-tts-speak"].append(os.path.join(HERE, "claude-tts-speak"))
 
 
 def usable_path():
@@ -120,10 +151,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.rstrip("/") != "/ping":
-            return self._json(404, {"ok": False, "error": "not found"})
-        self._json(200, {"ok": True, "service": "claude-tts-speakd",
-                         "auth": bool(TOKEN)})
+        route = self.path.rstrip("/")
+        if route == "/ping":
+            return self._json(200, {"ok": True, "service": "claude-tts-speakd",
+                                    "auth": bool(TOKEN)})
+        if route in SCRIPTS:
+            return self.do_script(route)
+        return self._json(404, {"ok": False, "error": "not found"})
+
+    def do_script(self, route):
+        """Serve one of the whitelisted scripts, first existing candidate wins."""
+        missing = []
+        for cand in SCRIPTS[route]:
+            try:
+                with open(cand, "rb") as fh:
+                    payload = fh.read()
+            except OSError:
+                missing.append(cand)
+                continue
+            return self._bytes(200, "text/x-shellscript", payload)
+        hint = ""
+        if route == "/install.sh" and not SERVE_DIR:
+            hint = ("; set CLAUDE_TTS_SERVE_DIR to a repo checkout, or launch"
+                    " this daemon from one")
+        return self._json(404, {"ok": False, "error":
+                                "no %s to serve%s (looked at: %s)"
+                                % (route, hint, ", ".join(missing) or "nowhere")})
 
     def _read_request(self):
         """Shared validation. Returns the parsed body, or None after replying."""
